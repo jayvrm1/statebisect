@@ -27,6 +27,7 @@ from statebisect.models import (
     CancellationToken,
     Change,
     HealthCheckOutcome,
+    HealthCheckResult,
     Investigation,
     InvestigationStatus,
 )
