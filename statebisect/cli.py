@@ -18,6 +18,14 @@ from .collector import (
     compare_snapshots,
 )
 from .models import CancellationToken, InvestigationStatus, MinimizationResult
+from .monitor import (
+    DEFAULT_DURATION_SEC,
+    MAX_DURATION_SEC,
+    MIN_DURATION_SEC,
+    MonitoringEngine,
+    MonitoringEvent,
+    MonitoringSession,
+)
 from .reporting import generate_json_report, generate_text_report
 from .scenarios import (
     ScenarioValidationError,
@@ -548,6 +556,257 @@ def cmd_compare_snapshots(args: argparse.Namespace) -> int:
             storage.close()
 
 
+def cmd_monitor_preview(args: argparse.Namespace) -> int:
+    """Preview available monitoring sources, permissions, and duration limits."""
+    engine = MonitoringEngine(allow_non_windows=True)
+    prev = engine.preview()
+    print("=" * 80)
+    print("STATEBISECT TARGETED CHANGE MONITORING PREVIEW")
+    print("=" * 80)
+    print("READ-ONLY GUARANTEE   : Read-only access only. Zero host modifications.")
+    print(f"Host Platform         : {prev['platform']}")
+    print(f"Duration Limits       : Min {prev['min_duration_sec']}s, Default {prev['default_duration_sec']}s, Max {prev['max_duration_sec']}s")
+    print(f"Max Events Buffer     : {prev['max_total_events']}")
+    print(f"Total Sources         : {prev['sources_count']}")
+    print("-" * 80)
+    print(f"{'Source ID':<18} {'Category':<12} {'Supported':<10} {'Permissions':<22} {'Description'}")
+    print("-" * 80)
+    for src in prev["sources"]:
+        supp_str = "YES" if src["supported"] else "NO"
+        print(
+            f"{src['source_id']:<18} {src['category']:<12} {supp_str:<10} {src['permission_requirement']:<22} {src['description'][:24]}"
+        )
+    print("=" * 80)
+    print("Notice: Monitoring is temporary, opt-in, foreground-only, and bounded.")
+    print("No startup tasks, scheduled jobs, or permanent background services are installed.")
+    return 0
+
+
+def cmd_monitor_start(args: argparse.Namespace) -> int:
+    """Execute a foreground, bounded change monitoring session."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        engine = MonitoringEngine()
+
+        duration = args.duration
+        sources = [s.strip() for s in args.sources.split(",")] if args.sources else None
+        with_snapshots = args.with_snapshots
+
+        print("=" * 80)
+        print("STATEBISECT TARGETED CHANGE MONITORING SESSION")
+        print("=" * 80)
+        print(f"Target Duration   : {duration}s")
+        print(f"Sources Requested : {', '.join(sources) if sources else 'All Default'}")
+        print(f"Pre/Post Snapshot : {'YES' if with_snapshots else 'NO'}")
+        print("Notice            : Monitoring is temporary and read-only.")
+        print("                    Press Ctrl+C to safely stop and flush session at any time.")
+        print("-" * 80)
+        print(f"{'Timestamp (UTC)':<24} {'Source':<16} {'Channel / Path':<22} {'Event':<14} {'Attribution'}")
+        print("-" * 80)
+
+        token = CancellationToken()
+
+        # Wire Ctrl+C signal safely
+        old_sigint = signal.getsignal(signal.SIGINT)
+
+        def sigint_handler(signum, frame):
+            print("\n[Ctrl+C received - stopping monitoring session gracefully...]")
+            token.cancel()
+
+        signal.signal(signal.SIGINT, sigint_handler)
+
+        def on_event(ev: MonitoringEvent) -> None:
+            proc_info = f"PID:{ev.process_id}" if ev.process_id else "N/A"
+            if ev.process_name:
+                proc_info += f" ({ev.process_name})"
+            print(f"{ev.timestamp_utc[:19]:<24} {ev.source_id:<16} {ev.channel_or_path[:21]:<22} {ev.event_code[:13]:<14} {proc_info}")
+
+        try:
+            session = engine.run_session(
+                duration_sec=duration,
+                sources_filter=sources,
+                with_snapshots=with_snapshots,
+                cancellation_token=token,
+                storage=storage,
+                event_callback=on_event,
+            )
+        finally:
+            signal.signal(signal.SIGINT, old_sigint)
+
+        print("\n" + "=" * 80)
+        print("MONITORING SESSION SUMMARY")
+        print("=" * 80)
+        print(f"Session ID        : {session.session_id}")
+        print(f"Status            : {session.status.value}")
+        print(f"Stop Reason       : {session.stop_reason}")
+        print(f"Started At        : {session.started_at}")
+        print(f"Stopped At        : {session.stopped_at}")
+        print(f"Elapsed Time      : {session.elapsed_sec:.2f}s (Requested: {session.duration_sec}s)")
+        print(f"Total Events      : {session.total_events}")
+        print(f"Sources Active    : {', '.join(session.sources_active) if session.sources_active else 'None'}")
+        print(f"Coverage Gaps     : {len(session.coverage_gaps)}")
+        if session.pre_snapshot_run_id:
+            print(f"Pre-Snapshot ID   : {session.pre_snapshot_run_id}")
+        if session.post_snapshot_run_id:
+            print(f"Post-Snapshot ID  : {session.post_snapshot_run_id}")
+        print("-" * 80)
+        print("EVENTS BY SOURCE:")
+        if not session.events_by_source:
+            print("  No events captured.")
+        else:
+            for src_name, count in sorted(session.events_by_source.items()):
+                print(f"  {src_name:<18}: {count} events")
+        if session.coverage_gaps:
+            print("-" * 80)
+            print("COVERAGE GAPS / LIMITATIONS:")
+            for g in session.coverage_gaps:
+                print(f"  [{g.category}] {g.source_id}: {g.reason}")
+        print("=" * 80)
+        print("Warning: Monitoring events are temporal observations, not causal explanations.")
+        print("Controlled experiments and verification are required to establish causation.")
+        print("=" * 80)
+        return 0
+
+    except Exception as err:
+        print(f"Monitoring Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_list_monitor_sessions(args: argparse.Namespace) -> int:
+    """List recorded monitoring sessions in database."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        sessions = storage.list_monitoring_sessions()
+        if not sessions:
+            print("No monitoring sessions found in database.")
+            return 0
+
+        print(f"Found {len(sessions)} monitoring session(s):\n")
+        print(f"{'Session ID':<18} {'Started At':<26} {'Status':<12} {'Elapsed':<10} {'Events':<8} {'Gaps'}")
+        print("-" * 80)
+        for s in sessions:
+            print(f"{s.session_id:<18} {s.started_at:<26} {s.status.value:<12} {s.elapsed_sec:>6.2f}s    {s.total_events:<8} {len(s.coverage_gaps)}")
+        return 0
+    except Exception as err:
+        print(f"Error listing sessions: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_inspect_monitor_session(args: argparse.Namespace) -> int:
+    """Inspect a monitoring session and its observed events."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        session = storage.get_monitoring_session(args.id)
+        if not session:
+            print(f"Error: Monitoring session '{args.id}' not found.", file=sys.stderr)
+            return 1
+
+        if args.format == "json":
+            out_obj = {
+                "session_id": session.session_id,
+                "created_at": session.created_at,
+                "started_at": session.started_at,
+                "stopped_at": session.stopped_at,
+                "duration_sec": session.duration_sec,
+                "elapsed_sec": session.elapsed_sec,
+                "status": session.status.value,
+                "stop_reason": session.stop_reason,
+                "pre_snapshot_run_id": session.pre_snapshot_run_id,
+                "post_snapshot_run_id": session.post_snapshot_run_id,
+                "sources_requested": session.sources_requested,
+                "sources_active": session.sources_active,
+                "total_events": session.total_events,
+                "events_by_source": session.events_by_source,
+                "loss_indicators": session.loss_indicators,
+                "coverage_gaps": [
+                    {
+                        "gap_id": g.gap_id,
+                        "source_id": g.source_id,
+                        "category": g.category,
+                        "reason": g.reason,
+                        "impact": g.impact,
+                    }
+                    for g in session.coverage_gaps
+                ],
+                "events": [
+                    {
+                        "event_id": e.event_id,
+                        "source_id": e.source_id,
+                        "category": e.category,
+                        "timestamp_utc": e.timestamp_utc,
+                        "source_timestamp": e.source_timestamp,
+                        "channel_or_path": e.channel_or_path,
+                        "event_code": e.event_code,
+                        "process_id": e.process_id,
+                        "process_name": e.process_name,
+                        "process_provenance": e.process_provenance.value,
+                        "payload": e.payload,
+                    }
+                    for e in session.events
+                ],
+            }
+            print(json.dumps(out_obj, indent=2))
+            return 0
+
+        print("=" * 80)
+        print(f"MONITORING SESSION: {session.session_id}")
+        print("=" * 80)
+        print(f"Status            : {session.status.value}")
+        print(f"Stop Reason       : {session.stop_reason}")
+        print(f"Started At        : {session.started_at}")
+        print(f"Stopped At        : {session.stopped_at}")
+        print(f"Duration (Elapsed): {session.elapsed_sec:.2f}s / {session.duration_sec}s requested")
+        print(f"Total Events      : {session.total_events}")
+        print(f"Coverage Gaps     : {len(session.coverage_gaps)}")
+        if session.pre_snapshot_run_id:
+            print(f"Pre-Snapshot ID   : {session.pre_snapshot_run_id}")
+        if session.post_snapshot_run_id:
+            print(f"Post-Snapshot ID  : {session.post_snapshot_run_id}")
+        print("-" * 80)
+        print("EVENTS BY SOURCE:")
+        for src_name, cnt in sorted(session.events_by_source.items()):
+            print(f"  {src_name:<18}: {cnt} items")
+        if session.coverage_gaps:
+            print("-" * 80)
+            print("COVERAGE GAPS:")
+            for g in session.coverage_gaps:
+                print(f"  [{g.category}] {g.source_id}: {g.reason}")
+        print("-" * 80)
+        print(f"OBSERVED EVENTS TIMELINE ({len(session.events)} events):")
+        for ev in session.events[:25]:
+            proc_info = f"PID:{ev.process_id}" if ev.process_id else "N/A"
+            if ev.process_name:
+                proc_info += f" ({ev.process_name})"
+            prov_str = f"[{ev.process_provenance.value}]"
+            print(f"  [{ev.timestamp_utc[:19]}] {ev.source_id:<14} {ev.channel_or_path[:20]:<21} {ev.event_code:<12} {proc_info:<16} {prov_str}")
+        if len(session.events) > 25:
+            print(f"  ... and {len(session.events) - 25} more events. Use --format json to view full event array.")
+        print("=" * 80)
+        return 0
+
+    except Exception as err:
+        print(f"Inspection Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -620,6 +879,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_comp.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_comp.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # monitor-preview
+    p_mprev = subparsers.add_parser("monitor-preview", help="Preview monitoring sources, permissions, and duration limits.")
+
+    # monitor-start
+    p_mstart = subparsers.add_parser("monitor-start", help="Start foreground bounded change monitoring session.")
+    p_mstart.add_argument("--duration", type=int, default=DEFAULT_DURATION_SEC, help=f"Duration in seconds (range: {MIN_DURATION_SEC}-{MAX_DURATION_SEC}, default: {DEFAULT_DURATION_SEC}).")
+    p_mstart.add_argument("--sources", default=None, help="Comma-separated source IDs to monitor (default: all supported).")
+    p_mstart.add_argument("--with-snapshots", action="store_true", help="Capture pre-session and post-session snapshots for diff correlation.")
+    p_mstart.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_mstart.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # list-monitor-sessions
+    p_mlist = subparsers.add_parser("list-monitor-sessions", help="List recorded monitoring sessions.")
+    p_mlist.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_mlist.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # inspect-monitor-session
+    p_mins = subparsers.add_parser("inspect-monitor-session", help="Inspect a monitoring session and its event timeline.")
+    p_mins.add_argument("id", help="Monitoring session ID to inspect.")
+    p_mins.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_mins.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_mins.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -651,6 +933,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_inspect_collection(args)
     elif args.command == "compare-snapshots":
         return cmd_compare_snapshots(args)
+    elif args.command == "monitor-preview":
+        return cmd_monitor_preview(args)
+    elif args.command == "monitor-start":
+        return cmd_monitor_start(args)
+    elif args.command == "list-monitor-sessions":
+        return cmd_list_monitor_sessions(args)
+    elif args.command == "inspect-monitor-session":
+        return cmd_inspect_monitor_session(args)
     else:
         parser.print_help()
         return 2

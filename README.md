@@ -123,17 +123,56 @@ StateBisect includes an opt-in, read-only Windows system collector that gathers 
 - **Safety Invariant**: If either snapshot had a `CoverageGap` in a given category, missing items in that category are strictly marked **`UNKNOWN`** rather than falsely inferred as `REMOVED` or `MODIFIED`.
 - Configuration differences are explicitly flagged as correlations, requiring controlled experiments to establish causation.
 
-## 6. Persistence, Evidence Model & Migrations
+## 6. Targeted Change Monitoring (Phase 5)
+
+StateBisect provides opt-in, temporary, foreground-only monitoring of system configuration changes. Monitoring sessions run strictly for a requested duration (bounded up to 300s) or until stopped by user cancellation (Ctrl+C).
+
+### Core Invariants:
+- **Foreground Only**: Runs as a single foreground CLI command. Never registers startup tasks, scheduled tasks, Windows services, or persistent background daemons.
+- **Explicit Opt-in**: Monitoring is OFF by default. It starts only on explicit user invocation and terminates cleanly when requested.
+- **Graceful Cancellation**: Traps SIGINT / Ctrl+C to halt polling immediately, flush buffered events, disarm all sources, and persist the session as `CANCELLED`.
+- **Zero Host Modifications**: All sources operate with standard user permissions. Never alters Windows audit policies or system settings.
+
+### Supported Monitoring Sources:
+1. **`event_log`**:
+   - Time-bounded polling of `Application` and `System` event logs using structured XML queries via `wevtutil`.
+   - Security log is excluded by default (requires elevated privileges).
+   - Extracts EventID, Provider, TimeCreated, ProcessId/Execution metadata.
+   - Redacts sensitive text and enforces 512-character bounds per field.
+2. **`registry_watcher`**:
+   - Strictly restricted to allowlisted user keys (e.g. `HKCU\Software\StateBisect`, `HKCU\Environment`).
+   - Any unlisted or security-sensitive paths (e.g. `SAM`, `SECURITY`, `LSA`) are rejected and recorded as coverage gaps.
+   - Read-only polling (`winreg.KEY_READ`). Zero write, create, or delete operations.
+   - Process attribution: Windows Registry does not natively record modifying PIDs without kernel ETW auditing; therefore `process_provenance` is explicitly set to `UNAVAILABLE` rather than guessing.
+3. **`sysmon`** (Pre-installed Only):
+   - Detects if Microsoft Sysinternals Sysmon is already installed and its operational channel is active.
+   - **Never installs, modifies, or configures Sysmon**.
+   - If missing, marks source `UNAVAILABLE` and records a clear coverage gap.
+   - When present, reads process-creation and network telemetry with `ProcessProvenance.EVENT_PAYLOAD`.
+4. **`etw`** (Evaluation & Safe Deferral):
+   - Evaluates whether kernel ETW sessions are safely viable without elevation.
+   - Because real-time ETW requires elevated Administrator or `TRACELOG_CREATE_REALTIME` permissions and persistent session handles, kernel ETW is safely deferred and documented as a `CoverageGap`.
+
+### Process Attribution Provenance:
+- `EVENT_PAYLOAD`: Directly provided in the event XML by the OS provider (e.g. Sysmon Image/ProcessID or Event Execution ProcessID).
+- `PROCESS_LOOKUP`: Resolved via running process table at event time.
+- `UNAVAILABLE`: Process identity was not captured by the source. StateBisect **never** guesses process attribution from timing alone.
+
+### Snapshot Correlation:
+- When `--with-snapshots` is specified, StateBisect automatically runs a Phase 4 read-only snapshot before monitoring starts (`pre_snapshot_run_id`) and immediately after monitoring ends (`post_snapshot_run_id`), linking the session to configuration diffs.
+
+## 7. Persistence, Evidence Model & Migrations
 
 - Default database: `data/statebisect.db`.
 - **Schema Migrations**:
-  - Automatically manages migrations up to Version 4 in `schema_migrations`.
-  - Non-destructive and idempotent: preserves all existing investigations, trials, and audit records.
+  - Automatically manages migrations up to Version 5 in `schema_migrations`.
+  - Non-destructive and idempotent: preserves all existing investigations, trials, snapshots, and diffs.
   - Tables:
     - `investigations`, `experiment_trials`, `audit_logs`, `health_check_evidence` (Phases 1–3).
     - `collection_runs`, `snapshot_records`, `coverage_gaps`, `snapshot_diffs` (Phase 4).
+    - `monitoring_sessions`, `monitoring_events`, `monitoring_coverage_gaps` (Phase 5).
 
-## 7. Command-Line Interface (CLI)
+## 8. Command-Line Interface (CLI)
 
 ```powershell
 # --- Investigation & Simulation Commands ---
@@ -144,25 +183,33 @@ python statebisect_cli.py inspect-investigation <investigation_id>
 python statebisect_cli.py export-report <investigation_id> --format json -o report.json
 
 # --- Read-Only Windows Collector Commands (Phase 4) ---
-# Preview collection sources and safety limits (dry run)
 python statebisect_cli.py collect-preview --lookback-sec 3600 --max-records 100
-
-# Run read-only collection and record snapshot to SQLite
 python statebisect_cli.py collect-windows --lookback-sec 3600 --max-records 100
-
-# List stored collection snapshots
 python statebisect_cli.py list-collections
-
-# Inspect a collection run and record samples
 python statebisect_cli.py inspect-collection <collection_run_id>
-
-# Compare two snapshot runs with gap-aware diffing
 python statebisect_cli.py compare-snapshots <base_run_id> <target_run_id>
+
+# --- Targeted Change Monitoring Commands (Phase 5) ---
+# Preview monitoring sources, permissions, and duration bounds
+python statebisect_cli.py monitor-preview
+
+# Start foreground bounded monitoring session (e.g. 30 seconds)
+python statebisect_cli.py monitor-start --duration 30
+
+# Start monitoring with pre- and post-session snapshot comparison
+python statebisect_cli.py monitor-start --duration 30 --with-snapshots
+
+# List recorded monitoring sessions
+python statebisect_cli.py list-monitor-sessions
+
+# Inspect monitoring session timeline and process attribution
+python statebisect_cli.py inspect-monitor-session <session_id>
+python statebisect_cli.py inspect-monitor-session <session_id> --format json
 ```
 
-## 8. Running Tests and Demos
+## 9. Running Tests and Demos
 
-### Run Full Test Suite (69 Tests Across 10 Modules)
+### Run Full Test Suite (85 Tests Across 11 Modules)
 ```powershell
 python -m unittest discover -s tests -v
 ```
@@ -172,11 +219,12 @@ python -m unittest discover -s tests -v
 python demo_phase1.py
 ```
 
-## 9. Phase Status
+## 10. Phase Status
 
 - [x] **Phase 0 — Repository review & product skeleton**: Completed.
 - [x] **Phase 1 — Simulated experiment runner & Delta Debugging**: Completed.
 - [x] **Phase 2 — Experiment definitions, CLI, and auditability**: Completed.
 - [x] **Phase 3 — Failure health checks and evidence model**: Completed.
 - [x] **Phase 4 — Windows read-only collector MVP**: Completed.
-- [ ] **Phase 5 — Targeted continuous collection & lightweight monitoring**: Next phase.
+- [x] **Phase 5 — Targeted continuous collection & lightweight monitoring**: Completed.
+- [ ] **Phase 6 — Candidate change generation & correlation engine**: Next phase.

@@ -25,8 +25,16 @@ from .models import (
     InvestigationStatus,
     utc_now_iso,
 )
+from .monitor.models import (
+    EventConfidence,
+    MonitoringCoverageGap,
+    MonitoringEvent,
+    MonitoringSession,
+    MonitoringSessionStatus,
+    ProcessProvenance,
+)
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 
 class Storage:
@@ -263,6 +271,79 @@ class Storage:
                     """
                 )
                 current_ver = 4
+
+            # Migration 5: Phase 5 Targeted Change Monitoring Sessions, Events, and Gaps
+            if current_ver < 5:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS monitoring_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        stopped_at TEXT NOT NULL,
+                        duration_sec INTEGER NOT NULL,
+                        elapsed_sec REAL NOT NULL,
+                        status TEXT NOT NULL,
+                        stop_reason TEXT NOT NULL,
+                        pre_snapshot_run_id TEXT,
+                        post_snapshot_run_id TEXT,
+                        sources_requested_json TEXT NOT NULL,
+                        sources_active_json TEXT NOT NULL,
+                        total_events INTEGER NOT NULL,
+                        events_by_source_json TEXT NOT NULL,
+                        loss_indicators_json TEXT NOT NULL,
+                        FOREIGN KEY (pre_snapshot_run_id) REFERENCES collection_runs(run_id) ON DELETE SET NULL,
+                        FOREIGN KEY (post_snapshot_run_id) REFERENCES collection_runs(run_id) ON DELETE SET NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_monitoring_sessions_status 
+                    ON monitoring_sessions(status);
+
+                    CREATE TABLE IF NOT EXISTS monitoring_events (
+                        event_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        source_version TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        timestamp_utc TEXT NOT NULL,
+                        source_timestamp TEXT NOT NULL,
+                        channel_or_path TEXT NOT NULL,
+                        event_code TEXT NOT NULL,
+                        process_id INTEGER,
+                        process_name TEXT,
+                        process_provenance TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        is_redacted INTEGER NOT NULL,
+                        is_truncated INTEGER NOT NULL,
+                        confidence TEXT NOT NULL,
+                        raw_ref TEXT,
+                        FOREIGN KEY (session_id) REFERENCES monitoring_sessions(session_id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_monitoring_events_session 
+                    ON monitoring_events(session_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_monitoring_events_source 
+                    ON monitoring_events(source_id);
+
+                    CREATE TABLE IF NOT EXISTS monitoring_coverage_gaps (
+                        gap_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        impact TEXT NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES monitoring_sessions(session_id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_monitoring_gaps_session 
+                    ON monitoring_coverage_gaps(session_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (5, datetime('now'), 'Add Phase 5 targeted change monitoring sessions, events, and gaps');
+                    """
+                )
+                current_ver = 5
 
     def log_audit(
         self,
@@ -678,6 +759,228 @@ class Storage:
             for r in rows
         ]
 
+    def save_monitoring_session(self, session: MonitoringSession) -> None:
+        """Persist a completed or cancelled monitoring session with its events and gaps."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO monitoring_sessions (
+                    session_id, created_at, started_at, stopped_at, duration_sec, elapsed_sec,
+                    status, stop_reason, pre_snapshot_run_id, post_snapshot_run_id,
+                    sources_requested_json, sources_active_json, total_events,
+                    events_by_source_json, loss_indicators_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    stopped_at = excluded.stopped_at,
+                    elapsed_sec = excluded.elapsed_sec,
+                    status = excluded.status,
+                    stop_reason = excluded.stop_reason,
+                    post_snapshot_run_id = excluded.post_snapshot_run_id,
+                    total_events = excluded.total_events,
+                    events_by_source_json = excluded.events_by_source_json,
+                    loss_indicators_json = excluded.loss_indicators_json
+                """,
+                (
+                    session.session_id,
+                    session.created_at,
+                    session.started_at,
+                    session.stopped_at,
+                    session.duration_sec,
+                    session.elapsed_sec,
+                    session.status.value,
+                    session.stop_reason,
+                    session.pre_snapshot_run_id,
+                    session.post_snapshot_run_id,
+                    json.dumps(session.sources_requested),
+                    json.dumps(session.sources_active),
+                    session.total_events,
+                    json.dumps(session.events_by_source),
+                    json.dumps(session.loss_indicators),
+                ),
+            )
+
+            # Persist events
+            for ev in session.events:
+                self._conn.execute(
+                    """
+                    INSERT INTO monitoring_events (
+                        event_id, session_id, source_id, source_version, category,
+                        timestamp_utc, source_timestamp, channel_or_path, event_code,
+                        process_id, process_name, process_provenance, payload_json,
+                        is_redacted, is_truncated, confidence, raw_ref
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_id) DO NOTHING
+                    """,
+                    (
+                        ev.event_id,
+                        ev.session_id,
+                        ev.source_id,
+                        ev.source_version,
+                        ev.category,
+                        ev.timestamp_utc,
+                        ev.source_timestamp,
+                        ev.channel_or_path,
+                        ev.event_code,
+                        ev.process_id,
+                        ev.process_name,
+                        ev.process_provenance.value,
+                        json.dumps(ev.payload),
+                        1 if ev.is_redacted else 0,
+                        1 if ev.is_truncated else 0,
+                        ev.confidence.value,
+                        ev.raw_ref,
+                    ),
+                )
+
+            # Persist coverage gaps
+            for gap in session.coverage_gaps:
+                self._conn.execute(
+                    """
+                    INSERT INTO monitoring_coverage_gaps (
+                        gap_id, session_id, source_id, category, reason, impact
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(gap_id) DO NOTHING
+                    """,
+                    (
+                        gap.gap_id,
+                        gap.session_id,
+                        gap.source_id,
+                        gap.category,
+                        gap.reason,
+                        gap.impact,
+                    ),
+                )
+
+    def get_monitoring_session(self, session_id: str) -> MonitoringSession | None:
+        """Fetch a monitoring session by ID with its events and coverage gaps."""
+        row = self._conn.execute(
+            "SELECT * FROM monitoring_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            return None
+
+        # Fetch events
+        ev_rows = self._conn.execute(
+            "SELECT * FROM monitoring_events WHERE session_id = ? ORDER BY timestamp_utc ASC",
+            (session_id,),
+        ).fetchall()
+        events = [
+            MonitoringEvent(
+                event_id=r["event_id"],
+                session_id=r["session_id"],
+                source_id=r["source_id"],
+                source_version=r["source_version"],
+                category=r["category"],
+                timestamp_utc=r["timestamp_utc"],
+                source_timestamp=r["source_timestamp"],
+                channel_or_path=r["channel_or_path"],
+                event_code=r["event_code"],
+                process_id=r["process_id"],
+                process_name=r["process_name"],
+                process_provenance=ProcessProvenance(r["process_provenance"]),
+                payload=json.loads(r["payload_json"]),
+                is_redacted=bool(r["is_redacted"]),
+                is_truncated=bool(r["is_truncated"]),
+                confidence=EventConfidence(r["confidence"]),
+                raw_ref=r["raw_ref"] or "",
+            )
+            for r in ev_rows
+        ]
+
+        # Fetch gaps
+        gap_rows = self._conn.execute(
+            "SELECT * FROM monitoring_coverage_gaps WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        gaps = [
+            MonitoringCoverageGap(
+                gap_id=g["gap_id"],
+                session_id=g["session_id"],
+                source_id=g["source_id"],
+                category=g["category"],
+                reason=g["reason"],
+                impact=g["impact"],
+            )
+            for g in gap_rows
+        ]
+
+        return MonitoringSession(
+            session_id=row["session_id"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            stopped_at=row["stopped_at"],
+            duration_sec=row["duration_sec"],
+            elapsed_sec=row["elapsed_sec"],
+            status=MonitoringSessionStatus(row["status"]),
+            stop_reason=row["stop_reason"],
+            pre_snapshot_run_id=row["pre_snapshot_run_id"],
+            post_snapshot_run_id=row["post_snapshot_run_id"],
+            sources_requested=json.loads(row["sources_requested_json"]),
+            sources_active=json.loads(row["sources_active_json"]),
+            total_events=row["total_events"],
+            events_by_source=json.loads(row["events_by_source_json"]),
+            loss_indicators=json.loads(row["loss_indicators_json"]),
+            events=events,
+            coverage_gaps=gaps,
+        )
+
+    def list_monitoring_sessions(self) -> list[MonitoringSession]:
+        """List summary of monitoring sessions without loading all individual event bodies."""
+        rows = self._conn.execute(
+            "SELECT * FROM monitoring_sessions ORDER BY started_at DESC"
+        ).fetchall()
+        return [
+            MonitoringSession(
+                session_id=r["session_id"],
+                created_at=r["created_at"],
+                started_at=r["started_at"],
+                stopped_at=r["stopped_at"],
+                duration_sec=r["duration_sec"],
+                elapsed_sec=r["elapsed_sec"],
+                status=MonitoringSessionStatus(r["status"]),
+                stop_reason=r["stop_reason"],
+                pre_snapshot_run_id=r["pre_snapshot_run_id"],
+                post_snapshot_run_id=r["post_snapshot_run_id"],
+                sources_requested=json.loads(r["sources_requested_json"]),
+                sources_active=json.loads(r["sources_active_json"]),
+                total_events=r["total_events"],
+                events_by_source=json.loads(r["events_by_source_json"]),
+                loss_indicators=json.loads(r["loss_indicators_json"]),
+                events=[],
+                coverage_gaps=[],
+            )
+            for r in rows
+        ]
+
+    def get_monitoring_events(self, session_id: str, limit: int = 1000) -> list[MonitoringEvent]:
+        """Fetch event records for a session with optional limit."""
+        rows = self._conn.execute(
+            "SELECT * FROM monitoring_events WHERE session_id = ? ORDER BY timestamp_utc ASC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+        return [
+            MonitoringEvent(
+                event_id=r["event_id"],
+                session_id=r["session_id"],
+                source_id=r["source_id"],
+                source_version=r["source_version"],
+                category=r["category"],
+                timestamp_utc=r["timestamp_utc"],
+                source_timestamp=r["source_timestamp"],
+                channel_or_path=r["channel_or_path"],
+                event_code=r["event_code"],
+                process_id=r["process_id"],
+                process_name=r["process_name"],
+                process_provenance=ProcessProvenance(r["process_provenance"]),
+                payload=json.loads(r["payload_json"]),
+                is_redacted=bool(r["is_redacted"]),
+                is_truncated=bool(r["is_truncated"]),
+                confidence=EventConfidence(r["confidence"]),
+                raw_ref=r["raw_ref"] or "",
+            )
+            for r in rows
+        ]
+
     def save_snapshot_diffs(self, diffs: list[SnapshotDiff]) -> None:
         """Persist snapshot comparison difference records."""
         with self._conn:
@@ -722,6 +1025,228 @@ class Storage:
                 after_data=json.loads(r["after_json"]) if r["after_json"] else None,
                 status=r["status"],
                 notes=r["notes"] or "",
+            )
+            for r in rows
+        ]
+
+    def save_monitoring_session(self, session: MonitoringSession) -> None:
+        """Persist a completed or cancelled monitoring session with its events and gaps."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO monitoring_sessions (
+                    session_id, created_at, started_at, stopped_at, duration_sec, elapsed_sec,
+                    status, stop_reason, pre_snapshot_run_id, post_snapshot_run_id,
+                    sources_requested_json, sources_active_json, total_events,
+                    events_by_source_json, loss_indicators_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    stopped_at = excluded.stopped_at,
+                    elapsed_sec = excluded.elapsed_sec,
+                    status = excluded.status,
+                    stop_reason = excluded.stop_reason,
+                    post_snapshot_run_id = excluded.post_snapshot_run_id,
+                    total_events = excluded.total_events,
+                    events_by_source_json = excluded.events_by_source_json,
+                    loss_indicators_json = excluded.loss_indicators_json
+                """,
+                (
+                    session.session_id,
+                    session.created_at,
+                    session.started_at,
+                    session.stopped_at,
+                    session.duration_sec,
+                    session.elapsed_sec,
+                    session.status.value,
+                    session.stop_reason,
+                    session.pre_snapshot_run_id,
+                    session.post_snapshot_run_id,
+                    json.dumps(session.sources_requested),
+                    json.dumps(session.sources_active),
+                    session.total_events,
+                    json.dumps(session.events_by_source),
+                    json.dumps(session.loss_indicators),
+                ),
+            )
+
+            # Persist events
+            for ev in session.events:
+                self._conn.execute(
+                    """
+                    INSERT INTO monitoring_events (
+                        event_id, session_id, source_id, source_version, category,
+                        timestamp_utc, source_timestamp, channel_or_path, event_code,
+                        process_id, process_name, process_provenance, payload_json,
+                        is_redacted, is_truncated, confidence, raw_ref
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_id) DO NOTHING
+                    """,
+                    (
+                        ev.event_id,
+                        ev.session_id,
+                        ev.source_id,
+                        ev.source_version,
+                        ev.category,
+                        ev.timestamp_utc,
+                        ev.source_timestamp,
+                        ev.channel_or_path,
+                        ev.event_code,
+                        ev.process_id,
+                        ev.process_name,
+                        ev.process_provenance.value,
+                        json.dumps(ev.payload),
+                        1 if ev.is_redacted else 0,
+                        1 if ev.is_truncated else 0,
+                        ev.confidence.value,
+                        ev.raw_ref,
+                    ),
+                )
+
+            # Persist coverage gaps
+            for gap in session.coverage_gaps:
+                self._conn.execute(
+                    """
+                    INSERT INTO monitoring_coverage_gaps (
+                        gap_id, session_id, source_id, category, reason, impact
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(gap_id) DO NOTHING
+                    """,
+                    (
+                        gap.gap_id,
+                        gap.session_id,
+                        gap.source_id,
+                        gap.category,
+                        gap.reason,
+                        gap.impact,
+                    ),
+                )
+
+    def get_monitoring_session(self, session_id: str) -> MonitoringSession | None:
+        """Fetch a monitoring session by ID with its events and coverage gaps."""
+        row = self._conn.execute(
+            "SELECT * FROM monitoring_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            return None
+
+        # Fetch events
+        ev_rows = self._conn.execute(
+            "SELECT * FROM monitoring_events WHERE session_id = ? ORDER BY timestamp_utc ASC",
+            (session_id,),
+        ).fetchall()
+        events = [
+            MonitoringEvent(
+                event_id=r["event_id"],
+                session_id=r["session_id"],
+                source_id=r["source_id"],
+                source_version=r["source_version"],
+                category=r["category"],
+                timestamp_utc=r["timestamp_utc"],
+                source_timestamp=r["source_timestamp"],
+                channel_or_path=r["channel_or_path"],
+                event_code=r["event_code"],
+                process_id=r["process_id"],
+                process_name=r["process_name"],
+                process_provenance=ProcessProvenance(r["process_provenance"]),
+                payload=json.loads(r["payload_json"]),
+                is_redacted=bool(r["is_redacted"]),
+                is_truncated=bool(r["is_truncated"]),
+                confidence=EventConfidence(r["confidence"]),
+                raw_ref=r["raw_ref"] or "",
+            )
+            for r in ev_rows
+        ]
+
+        # Fetch gaps
+        gap_rows = self._conn.execute(
+            "SELECT * FROM monitoring_coverage_gaps WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        gaps = [
+            MonitoringCoverageGap(
+                gap_id=g["gap_id"],
+                session_id=g["session_id"],
+                source_id=g["source_id"],
+                category=g["category"],
+                reason=g["reason"],
+                impact=g["impact"],
+            )
+            for g in gap_rows
+        ]
+
+        return MonitoringSession(
+            session_id=row["session_id"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            stopped_at=row["stopped_at"],
+            duration_sec=row["duration_sec"],
+            elapsed_sec=row["elapsed_sec"],
+            status=MonitoringSessionStatus(row["status"]),
+            stop_reason=row["stop_reason"],
+            pre_snapshot_run_id=row["pre_snapshot_run_id"],
+            post_snapshot_run_id=row["post_snapshot_run_id"],
+            sources_requested=json.loads(row["sources_requested_json"]),
+            sources_active=json.loads(row["sources_active_json"]),
+            total_events=row["total_events"],
+            events_by_source=json.loads(row["events_by_source_json"]),
+            loss_indicators=json.loads(row["loss_indicators_json"]),
+            events=events,
+            coverage_gaps=gaps,
+        )
+
+    def list_monitoring_sessions(self) -> list[MonitoringSession]:
+        """List summary of monitoring sessions without loading all individual event bodies."""
+        rows = self._conn.execute(
+            "SELECT * FROM monitoring_sessions ORDER BY started_at DESC"
+        ).fetchall()
+        return [
+            MonitoringSession(
+                session_id=r["session_id"],
+                created_at=r["created_at"],
+                started_at=r["started_at"],
+                stopped_at=r["stopped_at"],
+                duration_sec=r["duration_sec"],
+                elapsed_sec=r["elapsed_sec"],
+                status=MonitoringSessionStatus(r["status"]),
+                stop_reason=r["stop_reason"],
+                pre_snapshot_run_id=r["pre_snapshot_run_id"],
+                post_snapshot_run_id=r["post_snapshot_run_id"],
+                sources_requested=json.loads(r["sources_requested_json"]),
+                sources_active=json.loads(r["sources_active_json"]),
+                total_events=r["total_events"],
+                events_by_source=json.loads(r["events_by_source_json"]),
+                loss_indicators=json.loads(r["loss_indicators_json"]),
+                events=[],
+                coverage_gaps=[],
+            )
+            for r in rows
+        ]
+
+    def get_monitoring_events(self, session_id: str, limit: int = 1000) -> list[MonitoringEvent]:
+        """Fetch event records for a session with optional limit."""
+        rows = self._conn.execute(
+            "SELECT * FROM monitoring_events WHERE session_id = ? ORDER BY timestamp_utc ASC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+        return [
+            MonitoringEvent(
+                event_id=r["event_id"],
+                session_id=r["session_id"],
+                source_id=r["source_id"],
+                source_version=r["source_version"],
+                category=r["category"],
+                timestamp_utc=r["timestamp_utc"],
+                source_timestamp=r["source_timestamp"],
+                channel_or_path=r["channel_or_path"],
+                event_code=r["event_code"],
+                process_id=r["process_id"],
+                process_name=r["process_name"],
+                process_provenance=ProcessProvenance(r["process_provenance"]),
+                payload=json.loads(r["payload_json"]),
+                is_redacted=bool(r["is_redacted"]),
+                is_truncated=bool(r["is_truncated"]),
+                confidence=EventConfidence(r["confidence"]),
+                raw_ref=r["raw_ref"] or "",
             )
             for r in rows
         ]

@@ -114,14 +114,75 @@
 - Dry run preview validated (`python statebisect_cli.py collect-preview`).
 - Snapshot comparison verified with both identical runs and synthesized changes.
 
-## Known Limitations
-- Continuous monitoring and real-time event streaming are not yet active (scheduled for Phase 5).
-- Collection is point-in-time snapshotting; changes that occur between snapshot runs without leaving event log or registry traces are not captured.
-- Correlating collected host snapshots into disposable VM experiment environments is scheduled for Phase 7.
+## Phase 5: Targeted Change Monitoring
+- **Completed**:
+  - `statebisect/monitor/models.py`: Data models for bounded change monitoring sessions (`MonitoringSession`, `MonitoringEvent`, `MonitoringCoverageGap`, `MonitoringSessionStatus`, `ProcessProvenance`, `EventConfidence`).
+  - `statebisect/monitor/base.py`: `BaseMonitorSource` defining startup, polling, shutdown, preview, and loss tracking contracts.
+  - `statebisect/monitor/sources/`:
+    - `event_log.py`: Time-bounded polling of `Application` and `System` channels using high-water mark XML queries via `wevtutil`.
+    - `sysmon.py`: Non-invasive detection of pre-installed Sysmon. Never installs, modifies, or creates Sysmon files.
+    - `registry_watcher.py`: In-process observation of strictly allowlisted user registry keys (`winreg.KEY_READ`). Rejects forbidden paths (e.g. `SAM`, `SECURITY`, `LSA`). Tracks `process_provenance = ProcessProvenance.UNAVAILABLE`.
+    - `etw_evaluator.py`: Safe evaluation and deferral of real-time ETW kernel sessions to uphold zero-elevation and no-persistent-trace invariants.
+  - `statebisect/monitor/engine.py`: `MonitoringEngine` with conservative duration bounds (1s to 300s, default 30s), event buffer cap (2000 events), SIGINT / Ctrl+C clean shutdown, and optional pre/post snapshot integration.
+  - `statebisect/storage.py`: SQLite Schema Version 5 adding `monitoring_sessions`, `monitoring_events`, and `monitoring_coverage_gaps` tables with indexes and cascade deletion. Non-destructive migration from v1, v2, v3, and v4.
+  - `statebisect/cli.py`: Integrated subcommands:
+    - `monitor-preview`: Summary of monitoring sources, permissions, and duration bounds.
+    - `monitor-start`: Starts foreground bounded monitoring session with live event streaming and clean Ctrl+C handling.
+    - `list-monitor-sessions`: Lists recorded monitoring sessions with timestamps, elapsed times, event counts, and statuses.
+    - `inspect-monitor-session`: Detailed view of session metadata, observed event timeline, process attribution provenance, coverage gaps, and loss indicators.
+  - `tests/`: Added `tests/test_monitor.py` and updated `tests/test_cli.py` and `tests/test_migration.py`. Total test count: 85 tests across 11 modules, all passing.
 
-## Next Phase: Phase 5 — Targeted Continuous Collection & Lightweight Monitoring
-- **Entry Criteria**: Phase 4 acceptance criteria met (read-only Windows collector, 7 sources, gap-aware differ, Schema Version 4 migrations, 69 tests passing, verified standard-user safety).
+## Technology & Algorithm Decisions & Source Verification
+
+1. **Pluggable Health Check Architecture (Phase 3)**:
+   - **Primary Source**: System telemetry standards and Microsoft safe testing patterns.
+   - **Safety Boundary**: Scenario JSON definitions are untrusted data. Process health checks reference pre-registered executable IDs verified outside the scenario. Subprocess spawning enforces `shell=False`.
+2. **Loopback HTTP Isolation (Phase 3)**:
+   - **Primary Source**: RFC 6761 & RFC 1122.
+   - **Safety Boundary**: HTTP checks restricted strictly to loopback interfaces (`127.0.0.1`, `localhost`, `[::1]`). Redirects escaping loopback are blocked.
+3. **Flaky / Intermittent Result Handling (Phase 3)**:
+   - **Decision**: Strict consistency (`ALL_MATCH`). Any variance across repeated attempts is classified as `INCONCLUSIVE`.
+4. **In-Process Registry Enumeration (Phase 4)**:
+   - **Primary Source**: Microsoft Docs: `RegOpenKeyExW` / `winreg` documentation.
+   - **Decision**: Standard library `winreg` with `winreg.KEY_READ | winreg.KEY_WOW64_64KEY` and `KEY_WOW64_32KEY`. Reading keys in-process completes in <10ms with zero elevation.
+5. **Structured Windows Event Log Ingestion (Phase 4 & 5)**:
+   - **Primary Source**: Microsoft Learn: Event Logging Functions and modern API guidance.
+   - **Decision**: `wevtutil qe <Channel> /q:"*[System[TimeCreated[@SystemTime>='{high_water_mark}']]]" /f:xml /c:50`.
+   - **Tradeoff**: Returns structured XML with standard-user privileges. Security log is excluded by default as it requires elevated privileges (`SeSecurityPrivilege`).
+6. **Gap-Aware Snapshot Differ Semantics (Phase 4)**:
+   - **Decision**: If a category has a recorded `CoverageGap` in either snapshot, any difference in that category is marked `UNKNOWN` with status `INCONCLUSIVE`.
+7. **Privacy-Preserving Machine Identification (Phase 4)**:
+   - **Decision**: Salted pseudonymization: `machine-{sha256(hostname)[:16]}`. Avoids collecting or persisting hardware serials.
+8. **Sysmon Telemetry Integration Strategy (Phase 5)**:
+   - **Primary Source**: Microsoft Sysinternals: Sysmon Documentation.
+   - **Decision**: Read-only query of pre-existing `Microsoft-Windows-Sysmon/Operational` channel only.
+   - **Safety Invariant**: StateBisect **never** installs Sysmon, updates drivers, creates configuration XML, or enables services. If Sysmon is absent, the engine records an explicit `CoverageGap` and proceeds with remaining sources.
+9. **Safe Deferral of Real-Time ETW Tracing (Phase 5)**:
+   - **Primary Source**: Microsoft Learn: Event Tracing for Windows (ETW) Architecture and Security.
+   - **Decision**: Safely deferred and recorded as a documented limitation.
+   - **Tradeoff**: Real-time ETW sessions require `TRACELOG_CREATE_REALTIME` permissions (Administrators or Performance Log Users group), and kernel sessions require administrator rights and persistent logger configuration. To adhere strictly to StateBisect's core principle of zero elevation and temporary foreground execution, ETW is evaluated but safely deferred.
+10. **Strict Registry Observation Allowlist (Phase 5)**:
+    - **Decision**: Strictly enforced allowlist of user-space configuration paths (e.g. `HKCU\Software\StateBisect`, `HKCU\Environment`). Unlisted or security-sensitive paths (`SAM`, `SECURITY`, `LSA`) are rejected and recorded as coverage gaps. Zero write operations.
+11. **Process Attribution Provenance Invariant (Phase 5)**:
+    - **Decision**: Explicit `ProcessProvenance` (`EVENT_PAYLOAD`, `PROCESS_LOOKUP`, `UNAVAILABLE`).
+    - **Safety Invariant**: Process identity is **never** guessed or inferred from timing proximity alone. If source telemetry does not include process identity, it is marked `UNAVAILABLE`.
+
+## Verification Results
+- All 85 unit and integration tests passing (`python -m unittest discover -s tests -v`).
+- Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
+- Real-world collection run tested live on host Windows 11 machine (`python statebisect_cli.py collect-windows --max-records 20`).
+- Live 3-second monitoring session executed on Windows 11 host (`python statebisect_cli.py monitor-start --duration 3`), verified with `list-monitor-sessions` and `inspect-monitor-session` (text and JSON).
+- Dry run monitoring preview validated (`python statebisect_cli.py monitor-preview`).
+- Snapshot comparison verified with both identical runs and synthesized changes.
+
+## Known Limitations
+- Monitoring is point-in-time observation during the active session; changes that occurred prior to session start cannot be reconstructed from monitoring alone (though prior snapshots and event logs can be inspected).
+- Process attribution for registry changes is unavailable in standard user space without kernel-level driver auditing.
+- Automated ranking and correlation of candidate changes with failure onset times are scheduled for Phase 6.
+
+## Next Phase: Phase 6 — Candidate Change Generation & Correlation Engine
+- **Entry Criteria**: Phase 5 acceptance criteria met (targeted opt-in change monitoring, 4 sources, gap awareness, process provenance, Schema Version 5 migrations, 85 tests passing, verified standard-user safety).
 - **Upcoming Deliverables**:
-  - Lightweight event monitoring daemon / file watcher.
-  - Time-windowed change correlation near reported failure onset.
-  - Candidate change extraction for feeding into Delta Debugging scenarios.
+  - Ingestion and normalization of candidate changes from snapshot diffs and monitoring sessions.
+  - Temporal correlation engine grouping candidate changes near reported failure onset.
+  - Candidate change extraction and dependency graph generation for feeding into Delta Debugging scenarios.

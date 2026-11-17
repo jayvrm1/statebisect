@@ -25,7 +25,7 @@ class TestDatabaseMigrations(unittest.TestCase):
     def test_fresh_schema_initialization(self):
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 4)
+            self.assertEqual(storage.get_current_schema_version(), 5)
 
             # Check that all tables exist
             cursor = storage._conn.execute(
@@ -41,6 +41,9 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertIn("snapshot_records", tables)
             self.assertIn("coverage_gaps", tables)
             self.assertIn("snapshot_diffs", tables)
+            self.assertIn("monitoring_sessions", tables)
+            self.assertIn("monitoring_events", tables)
+            self.assertIn("monitoring_coverage_gaps", tables)
         finally:
             storage.close()
 
@@ -83,10 +86,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with StateBisect Storage (migrating to v4)
+        # 2. Open with StateBisect Storage (migrating to v5)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 4)
+            self.assertEqual(storage.get_current_schema_version(), 5)
 
             # 3. Verify existing legacy data is preserved intact
             inv = storage.get_investigation("phase1-inv")
@@ -174,7 +177,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with Storage (applies v4)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 4)
+            self.assertEqual(storage.get_current_schema_version(), 5)
             # Verify Phase 3 evidence preserved
             cursor = storage._conn.execute(
                 "SELECT status FROM health_check_evidence WHERE trial_id = 't-1'"
@@ -183,9 +186,58 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row[0], "PASS")
 
-            # Verify v4 tables exist and are functional
+            # Verify v4 and v5 tables exist and are functional
             runs = storage.list_collection_runs()
             self.assertEqual(len(runs), 0)
+            sessions = storage.list_monitoring_sessions()
+            self.assertEqual(len(sessions), 0)
+        finally:
+            storage.close()
+
+    def test_migrate_phase4_to_phase5_monitoring_tables(self):
+        # 1. Create a schema up to v4
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    description TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations VALUES (1, '2026-11-17T00:00:00Z', 'Phase 1');
+                INSERT INTO schema_migrations VALUES (2, '2026-11-17T00:00:00Z', 'Phase 2');
+                INSERT INTO schema_migrations VALUES (3, '2026-11-17T00:00:00Z', 'Phase 3');
+                INSERT INTO schema_migrations VALUES (4, '2026-11-17T00:00:00Z', 'Phase 4');
+
+                CREATE TABLE collection_runs (
+                    run_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    collector_version TEXT NOT NULL,
+                    os_platform TEXT NOT NULL,
+                    machine_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    duration_ms REAL NOT NULL,
+                    summary_json TEXT
+                );
+                INSERT INTO collection_runs VALUES ('coll-legacy', '2026-11-17T00:00:00Z', '2026-11-17T00:00:01Z', '1.0.0', 'Windows', 'mach-1', 'SUCCESS', 12.0, '{}');
+                """
+            )
+        conn.close()
+
+        # 2. Open with Storage (applies v5)
+        storage = Storage(self.db_path)
+        try:
+            self.assertEqual(storage.get_current_schema_version(), 5)
+            # Verify Phase 4 run preserved
+            runs = storage.list_collection_runs()
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0].run_id, "coll-legacy")
+
+            # Verify v5 tables exist
+            sessions = storage.list_monitoring_sessions()
+            self.assertEqual(len(sessions), 0)
         finally:
             storage.close()
 
@@ -194,7 +246,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         try:
             storage._apply_migrations()
             storage._apply_migrations()
-            self.assertEqual(storage.get_current_schema_version(), 4)
+            self.assertEqual(storage.get_current_schema_version(), 5)
         finally:
             storage.close()
 

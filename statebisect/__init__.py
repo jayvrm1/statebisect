@@ -42,6 +42,17 @@ from .models import (
     InvestigationStatus,
     MinimizationResult,
 )
+from .monitor import (
+    DEFAULT_DURATION_SEC,
+    MAX_DURATION_SEC,
+    MIN_DURATION_SEC,
+    MonitoringCoverageGap,
+    MonitoringEngine,
+    MonitoringEvent,
+    MonitoringSession,
+    MonitoringSessionStatus,
+    ProcessProvenance,
+)
 from .simulation import SimulatedWorkspace, create_key_value_health_check
 from .storage import Storage
 from .runner import ExperimentRunner
@@ -82,8 +93,16 @@ __all__ = [
     "Investigation",
     "InvestigationStatus",
     "LoopbackHttpCheck",
+    "MAX_DURATION_SEC",
     "MAX_EVIDENCE_LENGTH",
+    "MIN_DURATION_SEC",
     "MinimizationResult",
+    "MonitoringCoverageGap",
+    "MonitoringEngine",
+    "MonitoringEvent",
+    "MonitoringSession",
+    "MonitoringSessionStatus",
+    "ProcessProvenance",
     "ProcessRegistry",
     "RegisteredProcessCheck",
     "SafeLoopbackRedirectHandler",

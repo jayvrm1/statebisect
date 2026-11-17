@@ -186,6 +186,53 @@ class TestCLI(unittest.TestCase):
         self.assertIn(f"Before Run  : {run_1_id}", out)
         self.assertIn(f"After Run   : {run_2_id}", out)
 
+    def test_cli_monitor_preview(self):
+        code, out, _ = self.run_cli(["monitor-preview"])
+        self.assertEqual(code, 0)
+        self.assertIn("STATEBISECT TARGETED CHANGE MONITORING PREVIEW", out)
+        self.assertIn("event_log", out)
+        self.assertIn("registry_watcher", out)
+        self.assertIn("sysmon", out)
+        self.assertIn("etw", out)
+
+    def test_cli_monitor_start_and_inspect(self):
+        # 1. Run short 1s monitor session with specific source to keep fast
+        code, out, _ = self.run_cli([
+            "monitor-start",
+            "--duration", "1",
+            "--sources", "registry_watcher,etw",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("MONITORING SESSION SUMMARY", out)
+        self.assertIn("Session ID", out)
+
+        # 2. Extract Session ID from database
+        from statebisect.storage import Storage
+        storage = Storage(self.db_path)
+        sessions = storage.list_monitoring_sessions()
+        storage.close()
+        self.assertEqual(len(sessions), 1)
+        sess_id = sessions[0].session_id
+
+        # 3. List monitor sessions
+        code, out, _ = self.run_cli(["list-monitor-sessions", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn(sess_id, out)
+
+        # 4. Inspect session
+        code, out, _ = self.run_cli(["inspect-monitor-session", sess_id, "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn(f"MONITORING SESSION: {sess_id}", out)
+        self.assertIn("STATUS", out.upper())
+
+        # 5. Inspect session JSON
+        code, out, _ = self.run_cli(["inspect-monitor-session", sess_id, "--format", "json", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["session_id"], sess_id)
+        self.assertEqual(parsed["status"], "COMPLETED")
+
 
 if __name__ == "__main__":
     unittest.main()
