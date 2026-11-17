@@ -52,6 +52,8 @@ from .delta_debugging import DeltaDebugger
 from .models import (
     CancellationToken,
     Change,
+    HealthCheckOutcome,
+    HealthCheckResult,
     Investigation,
     InvestigationStatus,
     MinimizationResult,
