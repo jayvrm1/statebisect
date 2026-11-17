@@ -82,6 +82,15 @@ class RegisteredActionRegistry:
 class AdapterRegistry:
     """Manages available environment adapters."""
 
+    _default_instance: AdapterRegistry | None = None
+
+    @classmethod
+    def get_default(cls) -> AdapterRegistry:
+        """Return the shared default adapter registry."""
+        if cls._default_instance is None:
+            cls._default_instance = cls()
+        return cls._default_instance
+
     def __init__(self) -> None:
         self._adapters: dict[AdapterType, BaseEnvironmentAdapter] = {}
         self._action_registry = RegisteredActionRegistry()

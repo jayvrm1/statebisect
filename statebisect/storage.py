@@ -691,6 +691,16 @@ class Storage:
             for row in cursor.fetchall()
         ]
 
+    def update_investigation_status(self, investigation_id: str, status: InvestigationStatus) -> None:
+        """Update the status and updated_at timestamp of an investigation."""
+        val = status.value if hasattr(status, "value") else str(status)
+        now = utc_now_iso()
+        with self._conn:
+            self._conn.execute(
+                "UPDATE investigations SET status = ?, updated_at = ? WHERE id = ?",
+                (val, now, investigation_id),
+            )
+
     def save_evidence_attempt(
         self,
         attempt: HealthCheckAttempt,
@@ -1619,12 +1629,31 @@ class Storage:
                 ),
             )
 
-    def get_isolated_trials(self, investigation_id: str) -> list[IsolatedTrialRecord]:
-        """Fetch isolated trial records for an investigation."""
-        rows = self._conn.execute(
-            "SELECT * FROM isolated_trials WHERE investigation_id = ? ORDER BY start_time ASC",
-            (investigation_id,),
-        ).fetchall()
+    def get_isolated_trials(
+        self,
+        investigation_id: str | None = None,
+        environment_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[IsolatedTrialRecord]:
+        """Fetch isolated trial records filtered by investigation_id or environment_id."""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if investigation_id:
+            conditions.append("investigation_id = ?")
+            params.append(investigation_id)
+        if environment_id:
+            conditions.append("environment_id = ?")
+            params.append(environment_id)
+
+        where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        order_clause = " ORDER BY start_time DESC" if limit else " ORDER BY start_time ASC"
+        limit_clause = " LIMIT ?" if (limit is not None and limit > 0) else ""
+
+        if limit is not None and limit > 0:
+            params.append(limit)
+
+        sql = f"SELECT * FROM isolated_trials{where_clause}{order_clause}{limit_clause}"
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [self._row_to_isolated_trial(r) for r in rows]
 
     def get_isolated_trial(self, trial_id: str) -> IsolatedTrialRecord | None:

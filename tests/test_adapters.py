@@ -369,5 +369,79 @@ class TestWindowsSandboxEvaluation(unittest.TestCase):
         self.assertGreater(len(report["reasons_deferred"]), 0)
 
 
+class TestStorageIsolatedTrials(unittest.TestCase):
+    """Test Storage methods for isolated trials and environments."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "test_storage.db")
+        self.storage = Storage(self.db_path)
+
+    def tearDown(self):
+        self.storage.close()
+        self.temp_dir.cleanup()
+
+    def test_adapter_registry_get_default_singleton(self):
+        reg1 = AdapterRegistry.get_default()
+        reg2 = AdapterRegistry.get_default()
+        self.assertIs(reg1, reg2)
+        self.assertIsNotNone(reg1.get_adapter(AdapterType.SIMULATION))
+
+    def test_get_isolated_trials_filtering_and_limits(self):
+        inv = Investigation(id="inv-t1", symptom="Sym", target_system="Sys")
+        self.storage.save_investigation(inv)
+
+        # Update status
+        self.storage.update_investigation_status("inv-t1", InvestigationStatus.VERIFIED)
+        updated_inv = self.storage.get_investigation("inv-t1")
+        self.assertIsNotNone(updated_inv)
+        self.assertEqual(updated_inv.status, InvestigationStatus.VERIFIED)
+
+        # Register env
+        env = EnvironmentRecord(
+            environment_id="env-1",
+            adapter_type=AdapterType.SIMULATION,
+            display_name="Env 1",
+            is_disposable=True,
+            is_host=False,
+            status=EnvironmentStatus.REGISTERED,
+        )
+        self.storage.register_environment(env)
+
+        # Save trials
+        for i in range(5):
+            rec = IsolatedTrialRecord(
+                trial_id=f"trial-{i}",
+                investigation_id="inv-t1",
+                environment_id="env-1",
+                baseline_id="base-1",
+                adapter_type=AdapterType.SIMULATION,
+                lifecycle_state=TrialLifecycleState.COMPLETED,
+                is_simulation=True,
+                selected_change_ids=[f"c{i}"],
+                start_time=f"2026-03-30T10:0{i}:00Z",
+                finish_time=f"2026-03-30T10:0{i}:01Z",
+                outcome=HealthCheckOutcome.PASS,
+                output_bounded="OK",
+                duration_ms=10.0,
+                restore_status="ok",
+                verify_status="ok",
+                apply_status="ok",
+                test_status="ok",
+                cleanup_status="ok",
+            )
+            self.storage.save_isolated_trial(rec)
+
+        # Query by investigation_id
+        by_inv = self.storage.get_isolated_trials(investigation_id="inv-t1")
+        self.assertEqual(len(by_inv), 5)
+
+        # Query by environment_id with limit
+        by_env_limited = self.storage.get_isolated_trials(environment_id="env-1", limit=3)
+        self.assertEqual(len(by_env_limited), 3)
+        # Verify ordering: most recent first when limited
+        self.assertEqual(by_env_limited[0].trial_id, "trial-4")
+
+
 if __name__ == "__main__":
     unittest.main()
