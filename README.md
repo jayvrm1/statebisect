@@ -1,7 +1,7 @@
 # StateBisect
 
-> **Notice: Read-Only Windows Collector, Targeted Monitoring & Candidate Correlation**  
-> StateBisect is currently in a Phase 6 state. It features a read-only Windows Collector MVP, opt-in targeted change monitoring, and a deterministic candidate change generation and correlation engine. **No modifications are made to the host Windows registry, files, services, or system configuration.** All host telemetry collection executes with standard-user privileges. Candidate ranking establishes temporal and structural correlation for isolated delta-debugging experiments and is never represented as causal proof.
+> **Notice: Isolated Experiment Adapter and Trial Runner**  
+> StateBisect is currently in a Phase 7 state. It features a safe, isolated experiment adapter and trial runner with deterministic baseline restoration and verification before every trial. **No modifications are made to the host Windows registry, files, services, or system configuration.** Automated tests execute exclusively against in-memory simulation and test doubles. Real Hyper-V VM experiments require explicit user registration of disposable virtual machines, enforce strict non-host validation, and fall back safely to `UNAVAILABLE` without elevation. Candidate ranking and trial execution are never represented as causal proof.
 
 ## 1. Product Mission
 
@@ -61,6 +61,15 @@ statebisect/
 │   │   ├── models.py        # CandidateChange, CorrelationWindow, ScoreBreakdown, ReviewRecord
 │   │   ├── ranker.py        # Deterministic, explainable candidate scoring and ranking
 │   │   └── engine.py        # Bounded correlation window & multi-source corroboration
+│   ├── adapters/            # Isolated experiment adapters & trial runner (Phase 7)
+│   │   ├── base.py          # BaseEnvironmentAdapter abstract lifecycle contract
+│   │   ├── models.py        # EnvironmentRecord, BaselineRecord, IsolatedTrialRecord, enums
+│   │   ├── simulation_adapter.py # In-memory deterministic simulation adapter
+│   │   ├── fake_adapter.py  # Test-double adapter with fault injection capabilities
+│   │   ├── hyperv_adapter.py # Non-host Hyper-V adapter with standard checkpoint rollback
+│   │   ├── sandbox_evaluator.py # Windows Sandbox technical evaluation & deferral rationale
+│   │   ├── registry.py      # Action & Adapter registries (with command-key rejection)
+│   │   └── runner.py        # IsolatedTrialRunner orchestrating baseline restore & verify
 │   ├── health_checks/       # Pluggable, versioned health-check system
 │   │   ├── base.py          # BaseHealthCheck, evidence bounding, and secret redaction
 │   │   ├── simulated_state.py # State condition matcher (key-value and compound)
@@ -74,6 +83,7 @@ statebisect/
 │   ├── storage.py           # SQLite persistence layer with schema migrations & evidence store
 │   └── reporting.py         # Diagnostic text and JSON report generators
 ├── tests/
+│   ├── test_adapters.py     # Phase 7 adapter lifecycle, runner, and Hyper-V safety tests
 │   ├── test_correlation.py  # Phase 6 candidate generation, ranking, and audit tests
 │   ├── test_monitor.py      # Phase 5 monitoring engine, sources, and lifecycle tests
 │   ├── test_collector.py    # Phase 4 collector, sources, diffing, and gap tests
@@ -217,19 +227,54 @@ StateBisect bridges observed Windows telemetry with experiment execution by extr
 - Robust timezone parsing (ISO, UTC, local offset).
 - **Untimed Fallback**: If symptom onset time is unknown or omitted, the engine falls back to evidence strength and target relevance without failing.
 
-## 8. Persistence, Evidence Model & Migrations
+## 8. Isolated Experiment Adapters & Trial Runner (Phase 7)
+
+StateBisect provides a strict isolation boundary between the host operating system and experiment trials. **Under no circumstances does StateBisect execute candidate change trials directly against the host Windows operating system.**
+
+### Supported Environment Adapters:
+1. **`SimulationAdapter` (Default, In-Memory)**:
+   - Built on `SimulatedWorkspace`.
+   - Modifies in-memory dictionary state and evaluates health checks deterministically.
+   - Used by default (`is_simulation = True`) for rapid, non-destructive experimentation and testing.
+2. **`FakeAdapter` (Test Double)**:
+   - Configurable test-double adapter supporting fault injection (`fail_restore`, `fail_verify`, `fail_apply`, `fail_health_check`, `fail_cleanup`, `corrupt_on_cleanup_failure`).
+   - Verifies trial runner state machine transitions, recovery pathways, and dual-error handling under adversity without modifying external systems.
+3. **`HyperVAdapter` (Disposable VM Isolation)**:
+   - Connects to dedicated, disposable Hyper-V virtual machines.
+   - **Safety Invariants**:
+     - Explicit user registration: Environment must be explicitly marked `is_disposable=True`.
+     - Host refusal: Reject any environment attempting to target the host system (`is_host=False`).
+     - Identifier validation: VM names and snapshot names must match `^[a-zA-Z0-9_\-\. ]{1,128}$` (command injection defense).
+     - Standard checkpoint restore: Utilizes standard Hyper-V snapshots via `Restore-VMSnapshot` (with standard user privilege checks and `shell=False` execution). Standard checkpoints capture disk and RAM state at an exact point in time.
+     - Privilege fallback: If the standard user lacks Hyper-V administrator privileges or Hyper-V is disabled, returns `UNAVAILABLE` rather than crashing or attempting privilege escalation.
+4. **Windows Sandbox Technical Evaluation**:
+   - Windows Sandbox was evaluated against Microsoft documentation (Windows Sandbox architecture, `WindowsSandbox.exe`, `.wsb` configuration files).
+   - **Deferral Rationale**: Windows Sandbox is an ephemeral container that discards all state on exit. It lacks programmatic named checkpoint/restore mechanisms (no snapshotting API). Cold booting a new sandbox container for every trial incurs 15–30s latency per trial, making multi-trial delta debugging impractical. It is formally deferred with full evaluation documentation.
+
+### Trial Lifecycle State Machine:
+Isolated trials progress through 11 explicit lifecycle states:
+`PENDING` $\rightarrow$ `VALIDATING` $\rightarrow$ `RESTORING` $\rightarrow$ `BASELINE_VERIFIED` $\rightarrow$ `APPLYING` $\rightarrow$ `TESTING` $\rightarrow$ `CLEANING_UP` $\rightarrow$ `COMPLETED` / `FAILED` / `INCONCLUSIVE` / `CANCELLED` / `ENVIRONMENT_CORRUPTED`.
+
+- **Pre-Trial Verification**: Baseline state is restored and health check is verified *before* applying candidate changes. If the baseline fails health check before changes are applied, the trial aborts immediately.
+- **Mandatory Cleanup**: Teardown and baseline restore execute in an unconditional `finally` block. A trial is never considered successful if cleanup fails.
+- **Environment Corruption Protection**: If cleanup or baseline restore fails, the environment is marked `ENVIRONMENT_CORRUPTED` and locked out from future trials to prevent contamination.
+- **Dual-Exception Preservation**: Cleanups in `finally` blocks never contain `return`, `break`, or `continue`. If an error occurs during both trial execution and cleanup, both exceptions are preserved using Python's `__context__` exception chaining.
+- **Allowlisted Action Registry**: Only pre-registered, safe change actions can be applied. Actions specifying raw `command`, `shell`, or `powershell` keys or risk tiers above medium are strictly rejected.
+
+## 9. Persistence, Evidence Model & Migrations
 
 - Default database: `data/statebisect.db`.
 - **Schema Migrations**:
-  - Automatically manages migrations up to Version 6 in `schema_migrations`.
-  - Non-destructive and idempotent: preserves all existing investigations, trials, snapshots, monitoring sessions, and candidates.
+  - Automatically manages migrations up to Version 7 in `schema_migrations`.
+  - Non-destructive and idempotent: preserves all existing investigations, trials, snapshots, monitoring sessions, candidates, and reviews.
   - Tables:
     - `investigations`, `experiment_trials`, `audit_logs`, `health_check_evidence` (Phases 1–3).
     - `collection_runs`, `snapshot_records`, `coverage_gaps`, `snapshot_diffs` (Phase 4).
     - `monitoring_sessions`, `monitoring_events`, `monitoring_coverage_gaps` (Phase 5).
     - `investigation_candidates`, `candidate_reviews` (Phase 6).
+    - `registered_environments`, `registered_baselines`, `isolated_trials` (Phase 7).
 
-## 9. Command-Line Interface (CLI)
+## 10. Command-Line Interface (CLI)
 
 ```powershell
 # --- Investigation & Simulation Commands ---
@@ -247,46 +292,45 @@ python statebisect_cli.py inspect-collection <collection_run_id>
 python statebisect_cli.py compare-snapshots <base_run_id> <target_run_id>
 
 # --- Targeted Change Monitoring Commands (Phase 5) ---
-# Preview monitoring sources, permissions, and duration bounds
 python statebisect_cli.py monitor-preview
-
-# Start foreground bounded monitoring session (e.g. 30 seconds)
 python statebisect_cli.py monitor-start --duration 30
-
-# Start monitoring with pre- and post-session snapshot comparison
 python statebisect_cli.py monitor-start --duration 30 --with-snapshots
-
-# List recorded monitoring sessions
 python statebisect_cli.py list-monitor-sessions
-
-# Inspect monitoring session timeline and process attribution
 python statebisect_cli.py inspect-monitor-session <session_id>
 python statebisect_cli.py inspect-monitor-session <session_id> --format json
 
 # --- Candidate Generation & Review Commands (Phase 6) ---
-# 1. Create a new investigation record
 python statebisect_cli.py create-investigation --symptom "Database connection timeout" --target "PostgresApp" --onset "2026-03-30 14:00:00"
-
-# 2. Correlate snapshot diffs and monitoring events to generate ranked candidates
 python statebisect_cli.py generate-candidates <inv_id> --before-run <run_a> --after-run <run_b> --monitor-session <sess_id>
-
-# 3. List generated candidates
 python statebisect_cli.py list-candidates <inv_id>
 python statebisect_cli.py list-candidates <inv_id> --active-only
 python statebisect_cli.py list-candidates <inv_id> --format json
-
-# 4. Inspect detailed candidate score breakdown and provenance
 python statebisect_cli.py inspect-candidate <candidate_id>
-python statebisect_cli.py inspect-candidate <candidate_id> --format json
-
-# 5. Explicitly exclude or include a candidate with audited reason
 python statebisect_cli.py review-candidate <candidate_id> --exclude --reason "Verified routine antivirus definition update"
 python statebisect_cli.py review-candidate <candidate_id> --include --reason "Target config modified near onset"
+
+# --- Isolated Adapters & Trial Runner Commands (Phase 7) ---
+# 1. List available adapters and inspect Windows Sandbox technical evaluation
+python statebisect_cli.py list-adapters
+python statebisect_cli.py sandbox-evaluation
+
+# 2. Register, list, inspect, and verify environments and baselines
+python statebisect_cli.py register-environment --id test-vm-01 --name "Disposable Dev VM" --type hyperv --is-disposable
+python statebisect_cli.py list-environments
+python statebisect_cli.py inspect-environment sim-env-default
+python statebisect_cli.py register-baseline --id baseline-clean --env-id sim-env-default --name "Clean Baseline" --snapshot-ref "clean_v1"
+python statebisect_cli.py verify-baseline sim-env-default baseline-001
+
+# 3. Execute an isolated trial
+python statebisect_cli.py run-trial --env-id sim-env-default --baseline-id baseline-001 --changes c1,c2
+
+# 4. Run Delta Debugging minimization over an isolated adapter
+python statebisect_cli.py run-minimization --env-id sim-env-default --baseline-id baseline-001 --changes c1,c2,c3
 ```
 
-## 10. Running Tests and Demos
+## 11. Running Tests and Demos
 
-### Run Full Test Suite (99 Tests Across 12 Modules)
+### Run Full Test Suite (119 Tests Across 13 Modules)
 ```powershell
 python -m unittest discover -s tests -v
 ```
@@ -296,7 +340,7 @@ python -m unittest discover -s tests -v
 python demo_phase1.py
 ```
 
-## 11. Phase Status
+## 12. Phase Status
 
 - [x] **Phase 0 — Repository review & product skeleton**: Completed.
 - [x] **Phase 1 — Simulated experiment runner & Delta Debugging**: Completed.
@@ -305,4 +349,5 @@ python demo_phase1.py
 - [x] **Phase 4 — Windows read-only collector MVP**: Completed.
 - [x] **Phase 5 — Targeted continuous collection & lightweight monitoring**: Completed.
 - [x] **Phase 6 — Candidate change generation & correlation engine**: Completed.
-- [ ] **Phase 7 — Isolated trial runner & VM/Sandbox abstraction**: Next phase.
+- [x] **Phase 7 — Isolated trial runner & VM/Sandbox abstraction**: Completed.
+- [ ] **Phase 8 — Verification, reproduction, and differential validation**: Next phase.

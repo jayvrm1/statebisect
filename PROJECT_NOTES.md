@@ -215,15 +215,69 @@
    - **Decision**: Users can review each candidate change and mark it `EXCLUDED` with an audit reason.
    - **Safety Invariant**: When a candidate is marked `EXCLUDED`, `is_active` is set to `False`. Downstream Delta Debugging runners and experiment generators must respect `active_only=True` and **never** silently reintroduce an excluded candidate into trial sets. All decisions are immutably logged in `candidate_reviews`.
 
-## Verification Results
-- All 99 unit and integration tests passing (`python -m unittest discover -s tests -v`).
-- Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
-- Full CLI investigation and candidate correlation workflow verified end-to-end (`create-investigation`, `generate-candidates`, `list-candidates`, `inspect-candidate`, `review-candidate`).
-- Schema migrations from v1 through v6 verified with zero data loss.
+## Phase 7: Isolated Experiment Adapters & Trial Runner
+- **Completed**:
+  - `statebisect/adapters/models.py`:
+    - Enums: `AdapterType` (`SIMULATION`, `FAKE`, `HYPERV`, `WINDOWS_SANDBOX`), `EnvironmentStatus` (`REGISTERED`, `VERIFIED`, `CORRUPTED`, `UNAVAILABLE`), `TrialLifecycleState` (11 states: `PENDING`, `VALIDATING`, `RESTORING`, `BASELINE_VERIFIED`, `APPLYING`, `TESTING`, `CLEANING_UP`, `COMPLETED`, `FAILED`, `INCONCLUSIVE`, `CANCELLED`, `ENVIRONMENT_CORRUPTED`).
+    - Dataclasses: `EnvironmentRecord`, `BaselineRecord`, `AdapterOperationResult`, `RegisteredChangeAction`, `IsolatedTrialRecord`.
+    - Safety invariant enforcement: `is_simulation` properties, non-host refusal (`is_host=False`), and `is_disposable` requirement.
+  - `statebisect/adapters/base.py`:
+    - `BaseEnvironmentAdapter` defining typed abstract contract for initialization, baseline restoration, baseline verification, change application, health check execution, and trial teardown.
+  - `statebisect/adapters/simulation_adapter.py`:
+    - Pure in-memory deterministic simulation adapter wrapping `SimulatedWorkspace`. Used by default.
+    - Default environment `sim-env-default` and baseline `baseline-001`.
+  - `statebisect/adapters/fake_adapter.py`:
+    - Configurable test-double adapter supporting fault injection (`fail_restore`, `fail_verify`, `fail_apply`, `fail_health_check`, `fail_cleanup`, `corrupt_on_cleanup_failure`, `call_history`) to rigorously test lifecycle error handling and corruption protection without external side effects.
+  - `statebisect/adapters/hyperv_adapter.py`:
+    - Safe Hyper-V VM adapter:
+      - Validates non-host identity (`is_host=False`) and disposable registration (`is_disposable=True`).
+      - Validates VM and checkpoint names against strict regex (`^[a-zA-Z0-9_\-\. ]{1,128}$`) to prevent injection.
+      - Dispatches standard checkpoint restore via PowerShell (`Restore-VMSnapshot`) using `shell=False`.
+      - Checks Hyper-V availability and user permissions; falls back gracefully to `UNAVAILABLE` without attempting privilege escalation.
+  - `statebisect/adapters/sandbox_evaluator.py`:
+    - `WindowsSandboxEvaluation` technical evaluation citing official Microsoft documentation. Documents the decision to defer Windows Sandbox due to lack of programmatic checkpoint/restore mechanisms and cold boot latency (15-30s per container launch).
+  - `statebisect/adapters/registry.py`:
+    - `RegisteredActionRegistry`: Allowlisted registry rejecting raw command/shell/powershell keys and risk tiers above medium.
+    - `AdapterRegistry`: Manages adapter lifecycle, defaulting to `SimulationAdapter`.
+  - `statebisect/adapters/runner.py`:
+    - `IsolatedTrialRunner`: Orchestrates baseline restore and health-check verification *before* applying candidate changes, executes health check, enforces mandatory cleanup in an unconditional `finally` block, preserves dual exceptions without control flow statements in `finally`, locks out corrupted environments (`ENVIRONMENT_CORRUPTED`), and implements a compatibility method `run_trial(...)` for `DeltaDebugger`.
+  - `statebisect/storage.py`:
+    - Schema Version 7: Adds `registered_environments`, `registered_baselines`, and `isolated_trials` tables with cascade deletion and indexing.
+    - Storage helper methods: `register_environment`, `get_environment`, `list_environments`, `update_environment_status`, `register_baseline`, `get_baseline`, `list_baselines`, `save_isolated_trial`, `get_isolated_trials`, `get_isolated_trial`, `update_investigation_status`.
+    - Non-destructive migration from v1-v6 to v7.
+  - `statebisect/cli.py`:
+    - Integrated subcommands: `list-adapters`, `sandbox-evaluation`, `list-environments`, `inspect-environment`, `register-environment`, `register-baseline`, `verify-baseline`, `run-trial`, `run-minimization`.
+  - `tests/`:
+    - Added `tests/test_adapters.py` (18 tests covering adapters, fake fault injection, action registry rejection of shell commands, runner lifecycle state transitions, corruption protection, cancellation, Hyper-V safety checks, and sandbox evaluation).
+    - Updated `tests/test_cli.py` and `tests/test_migration.py`.
+    - Total test suite: 119 tests across 13 modules, all passing.
 
-## Next Phase: Phase 7 — Isolated Trial Runner & VM/Sandbox Abstraction
-- **Entry Criteria**: Phase 6 acceptance criteria met (candidate generation from diffs/events, deterministic explainable ranking, bounded correlation window, user review audit trail, Schema Version 6 migrations, 99 tests passing).
+## Technology & Algorithm Decisions & Source Verification
+
+1. **Standard Checkpoints vs. Production Checkpoints (Hyper-V)**:
+   - **Primary Source**: Microsoft Learn: "Choose between standard or production checkpoints in Hyper-V" (2023/2024).
+   - **Decision**: StateBisect utilizes standard checkpoints (`Restore-VMSnapshot`) for isolation trials.
+   - **Rationale**: Production checkpoints rely on VSS inside guest Windows to perform application-consistent backup, which does not capture complete in-memory machine state or exact point-in-time configuration differentials. Standard checkpoints capture the exact disk and memory state, enabling instantaneous and deterministic rollback to clean baselines.
+2. **Windows Sandbox Technical Deferral**:
+   - **Primary Source**: Microsoft Learn: "Windows Sandbox architecture and configuration" (2024).
+   - **Decision**: Formally evaluate and document Windows Sandbox capabilities, but defer live adapter execution in favor of disposable Hyper-V VMs.
+   - **Rationale**: Windows Sandbox is architecturally stateless and ephemeral. It does not provide an API for in-place snapshotting or rollback. Each trial would require a cold boot of a new sandbox container taking 15–30 seconds, leading to unviable test times for Delta Debugging ($O(N)$ trials).
+3. **Mandatory Exception Handling in Cleanup (`finally` block)**:
+   - **Decision**: Adhere strictly to the rule prohibiting `return`, `break`, or `continue` inside `finally` blocks.
+   - **Safety Boundary**: Using `return` in a `finally` block suppresses any exception thrown in the `try` block. In `IsolatedTrialRunner`, any cleanup error is either logged or chained to the primary trial exception via `__context__`, ensuring no unexpected crash or contamination is swallowed.
+4. **Environment Corruption Isolation Invariant**:
+   - **Decision**: If an adapter fails to restore its baseline or cleanup a trial, its status is immediately transitioned to `ENVIRONMENT_CORRUPTED`.
+   - **Safety Invariant**: All subsequent trials against that environment ID are refused immediately with an error. Contaminated environments are never reused for Delta Debugging experiments.
+
+## Verification Results
+- All 119 unit and integration tests passing (`python -m unittest discover -s tests -v`).
+- Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
+- Phase 7 CLI workflow verified end-to-end (`list-adapters`, `sandbox-evaluation`, `list-environments`, `inspect-environment`, `verify-baseline`, `run-trial`, `run-minimization`).
+- Schema migrations from v1 through v7 verified with zero data loss.
+
+## Next Phase: Phase 8 — Verification, Reproduction, and Differential Validation
+- **Entry Criteria**: Phase 7 acceptance criteria met (safe isolated environment adapters, Simulation/Fake/Hyper-V implementations, Windows Sandbox documented evaluation, pre-trial and post-trial baseline verification, Schema Version 7 migrations, 119 tests passing).
 - **Upcoming Deliverables**:
-  - Virtual machine / Windows Sandbox isolation boundary for safe reproduction of candidate changes.
-  - Safe state injection and snapshot revert lifecycle for Hyper-V / Sandbox.
-  - Integration of prioritized candidate sets with Delta Debugging runner in isolated environments.
+  - Verification of minimal failure-inducing sets: confirming that candidate changes reproduce the symptom and removing any change restores health.
+  - Differential validation across alternative baselines.
+  - Distinction between necessary changes, sufficient changes, and correlated bystanders.

@@ -368,6 +368,159 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("New Status      : INCLUDED (Active: True)", out)
 
+    def test_cli_phase7_isolated_adapters_and_trials_workflow(self):
+        # 1. list-adapters
+        code, out, _ = self.run_cli(["list-adapters"])
+        self.assertEqual(code, 0)
+        self.assertIn("STATEBISECT ISOLATED ENVIRONMENT ADAPTERS", out)
+        self.assertIn("simulation", out)
+        self.assertIn("[DEFAULT]", out)
+        self.assertIn("hyperv", out)
+
+        code, out, _ = self.run_cli(["list-adapters", "--format", "json"])
+        self.assertEqual(code, 0)
+        adp_data = json.loads(out)
+        self.assertTrue(any(a["name"] == "simulation" for a in adp_data))
+
+        # 2. sandbox-evaluation
+        code, out, _ = self.run_cli(["sandbox-evaluation"])
+        self.assertEqual(code, 0)
+        self.assertIn("WINDOWS SANDBOX TECHNICAL EVALUATION", out)
+        self.assertIn("DEFERRED", out)
+
+        code, out, _ = self.run_cli(["sandbox-evaluation", "--format", "json"])
+        self.assertEqual(code, 0)
+        wsb_data = json.loads(out)
+        self.assertEqual(wsb_data["status"], "DEFERRED")
+
+        # 3. register-environment: host refusal
+        code, out, err = self.run_cli([
+            "register-environment",
+            "--id", "env-host",
+            "--name", "Host System",
+            "--is-host",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 1)
+        self.assertIn("Refusing to register host machine", err)
+
+        # 4. register-environment: valid disposable simulation environment
+        code, out, _ = self.run_cli([
+            "register-environment",
+            "--id", "sim-custom-1",
+            "--name", "Custom Simulation Environment",
+            "--is-disposable",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("ENVIRONMENT REGISTERED: sim-custom-1", out)
+
+        # 5. register-baseline
+        code, out, _ = self.run_cli([
+            "register-baseline",
+            "--environment", "sim-custom-1",
+            "--baseline-id", "base-clean-1",
+            "--name", "Initial Clean State",
+            "--checkpoint-ref", "sim-chk-001",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("BASELINE REGISTERED: base-clean-1", out)
+
+        # 6. inspect-environment
+        code, out, _ = self.run_cli(["inspect-environment", "sim-custom-1", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn("ENVIRONMENT INSPECTION: sim-custom-1", out)
+        self.assertIn("base-clean-1", out)
+
+        # 7. list-environments
+        code, out, _ = self.run_cli(["list-environments", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn("sim-custom-1", out)
+
+        # 8. verify-baseline
+        code, out, _ = self.run_cli([
+            "verify-baseline",
+            "--environment", "sim-env-default",
+            "--baseline", "baseline-001",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("BASELINE VERIFICATION PASSED", out)
+
+        # 9. run-trial: baseline check (no changes) -> passes
+        code, out, _ = self.run_cli([
+            "run-trial",
+            "--environment", "sim-env-default",
+            "--baseline", "baseline-001",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("STARTING ISOLATED TRIAL", out)
+        self.assertIn("Outcome          : PASS", out)
+        self.assertIn("Lifecycle State  : COMPLETED", out)
+
+        # 10. run-minimization with candidate changes
+        from statebisect.storage import Storage
+        from statebisect.models import Investigation, InvestigationStatus
+        from statebisect.correlation.models import CandidateChange, CandidateEvidenceType, CandidateReversibility
+
+        storage = Storage(self.db_path)
+        try:
+            inv = Investigation(
+                id="inv-cli-min",
+                symptom="Service failure on test config",
+                target_system="TestService",
+                status=InvestigationStatus.NEW,
+                baseline_id="baseline-001",
+            )
+            storage.save_investigation(inv)
+
+            cands = [
+                CandidateChange(
+                    candidate_id="cand-good-1",
+                    investigation_id="inv-cli-min",
+                    evidence_type=CandidateEvidenceType.SNAPSHOT_DIFF,
+                    category="config",
+                    object_key="timeout",
+                    display_name="Timeout config",
+                    description="Timeout change",
+                    first_observed_utc="2026-03-30T12:00:00Z",
+                    last_observed_utc="2026-03-30T12:00:00Z",
+                    after_value="30",
+                    score=5.0,
+                    reversibility=CandidateReversibility.SIMULATABLE,
+                ),
+                CandidateChange(
+                    candidate_id="cand-bad-1",
+                    investigation_id="inv-cli-min",
+                    evidence_type=CandidateEvidenceType.SNAPSHOT_DIFF,
+                    category="config",
+                    object_key="status",
+                    display_name="Status config",
+                    description="Status failure change",
+                    first_observed_utc="2026-03-30T12:00:00Z",
+                    last_observed_utc="2026-03-30T12:00:00Z",
+                    after_value="failed",
+                    score=10.0,
+                    reversibility=CandidateReversibility.SIMULATABLE,
+                ),
+            ]
+            storage.save_candidates("inv-cli-min", cands)
+        finally:
+            storage.close()
+
+        code, out, err = self.run_cli([
+            "run-minimization",
+            "--investigation", "inv-cli-min",
+            "--db", self.db_path,
+        ])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("STATEBISECT ISOLATED DELTA DEBUGGING MINIMIZATION", out)
+        self.assertIn("MINIMIZATION COMPLETED", out)
+        self.assertIn("Result Verdict   : SUCCESS", out)
+        self.assertIn("cand-bad-1", out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,7 +25,7 @@ class TestDatabaseMigrations(unittest.TestCase):
     def test_fresh_schema_initialization(self):
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 6)
+            self.assertEqual(storage.get_current_schema_version(), 7)
 
             # Check that all tables exist
             cursor = storage._conn.execute(
@@ -46,6 +46,9 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertIn("monitoring_coverage_gaps", tables)
             self.assertIn("investigation_candidates", tables)
             self.assertIn("candidate_reviews", tables)
+            self.assertIn("registered_environments", tables)
+            self.assertIn("registered_baselines", tables)
+            self.assertIn("isolated_trials", tables)
         finally:
             storage.close()
 
@@ -88,10 +91,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with StateBisect Storage (migrating to v6)
+        # 2. Open with StateBisect Storage (migrating to v7)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 6)
+            self.assertEqual(storage.get_current_schema_version(), 7)
 
             # 3. Verify existing legacy data is preserved intact
             inv = storage.get_investigation("phase1-inv")
@@ -177,10 +180,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with Storage (applies v4, v5, v6)
+        # 2. Open with Storage (applies v4, v5, v6, v7)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 6)
+            self.assertEqual(storage.get_current_schema_version(), 7)
             # Verify Phase 3 evidence preserved
             cursor = storage._conn.execute(
                 "SELECT status FROM health_check_evidence WHERE trial_id = 't-1'"
@@ -231,10 +234,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with Storage (applies v5, v6)
+        # 2. Open with Storage (applies v5, v6, v7)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 6)
+            self.assertEqual(storage.get_current_schema_version(), 7)
             # Verify Phase 4 run preserved
             runs = storage.list_collection_runs()
             self.assertEqual(len(runs), 1)
@@ -283,10 +286,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with Storage (applies v6)
+        # 2. Open with Storage (applies v6, v7)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 6)
+            self.assertEqual(storage.get_current_schema_version(), 7)
             inv = storage.get_investigation("inv-p5")
             self.assertIsNotNone(inv)
             self.assertEqual(inv.symptom, "Test v5 symptom")
@@ -298,12 +301,102 @@ class TestDatabaseMigrations(unittest.TestCase):
         finally:
             storage.close()
 
+    def test_migrate_phase6_to_phase7_isolated_adapters(self):
+        # 1. Create a schema up to v6
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    description TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations VALUES (1, '2026-11-17T00:00:00Z', 'Phase 1');
+                INSERT INTO schema_migrations VALUES (2, '2026-11-17T00:00:00Z', 'Phase 2');
+                INSERT INTO schema_migrations VALUES (3, '2026-11-17T00:00:00Z', 'Phase 3');
+                INSERT INTO schema_migrations VALUES (4, '2026-11-17T00:00:00Z', 'Phase 4');
+                INSERT INTO schema_migrations VALUES (5, '2026-11-17T00:00:00Z', 'Phase 5');
+                INSERT INTO schema_migrations VALUES (6, '2026-11-17T00:00:00Z', 'Phase 6');
+
+                CREATE TABLE investigations (
+                    id TEXT PRIMARY KEY,
+                    symptom TEXT NOT NULL,
+                    target_system TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    baseline_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    coverage_limitations TEXT,
+                    scenario_id TEXT,
+                    scenario_hash TEXT,
+                    scenario_snapshot TEXT,
+                    engine_version TEXT,
+                    failure_onset_timestamp TEXT,
+                    onset_timezone TEXT DEFAULT 'UTC',
+                    ranking_version TEXT DEFAULT '1.0.0',
+                    correlation_window_start TEXT,
+                    correlation_window_end TEXT
+                );
+                INSERT INTO investigations (id, symptom, target_system, status, baseline_id, created_at, updated_at)
+                VALUES ('inv-p6', 'Test v6 symptom', 'TargetApp', 'NEW', 'base-1', '2026-11-17T00:00:00Z', '2026-11-17T00:00:00Z');
+                """
+            )
+        conn.close()
+
+        # 2. Open with Storage (applies v7)
+        storage = Storage(self.db_path)
+        try:
+            self.assertEqual(storage.get_current_schema_version(), 7)
+
+            # Verify tables exist
+            cursor = storage._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = {r[0] for r in cursor.fetchall()}
+            self.assertIn("registered_environments", tables)
+            self.assertIn("registered_baselines", tables)
+            self.assertIn("isolated_trials", tables)
+
+            # Verify storage operations
+            from statebisect.adapters.models import (
+                AdapterType,
+                EnvironmentRecord,
+                EnvironmentStatus,
+                BaselineRecord,
+                IsolatedTrialRecord,
+                TrialLifecycleState,
+            )
+            env = EnvironmentRecord(
+                environment_id="test-env-1",
+                adapter_type=AdapterType.SIMULATION,
+                display_name="Test Env",
+                is_disposable=True,
+                is_host=False,
+                status=EnvironmentStatus.REGISTERED,
+            )
+            storage.register_environment(env)
+            fetched_env = storage.get_environment("test-env-1")
+            self.assertIsNotNone(fetched_env)
+            self.assertEqual(fetched_env.display_name, "Test Env")
+
+            base = BaselineRecord(
+                baseline_id="b-1",
+                environment_id="test-env-1",
+                display_name="Clean Base",
+                checksum_or_state="chk-1",
+            )
+            storage.register_baseline(base)
+            fetched_base = storage.get_baseline("test-env-1", "b-1")
+            self.assertIsNotNone(fetched_base)
+            self.assertEqual(fetched_base.checksum_or_state, "chk-1")
+        finally:
+            storage.close()
+
     def test_migrations_are_repeat_safe(self):
         storage = Storage(self.db_path)
         try:
             storage._apply_migrations()
             storage._apply_migrations()
-            self.assertEqual(storage.get_current_schema_version(), 6)
+            self.assertEqual(storage.get_current_schema_version(), 7)
         finally:
             storage.close()
 

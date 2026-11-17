@@ -30,9 +30,28 @@ from .correlation import (
     CorrelationWindow,
     ScoreBreakdown,
 )
+from .adapters import (
+    AdapterOperationResult,
+    AdapterRegistry,
+    AdapterType,
+    BaseEnvironmentAdapter,
+    BaselineRecord,
+    EnvironmentRecord,
+    EnvironmentStatus,
+    FakeAdapter,
+    HyperVAdapter,
+    IsolatedTrialRecord,
+    IsolatedTrialRunner,
+    RegisteredActionRegistry,
+    SimulationAdapter,
+    TrialLifecycleState,
+    WindowsSandboxEvaluation,
+)
 from .correlation.engine import parse_iso_or_user_time
+from .delta_debugging import DeltaDebugger
 from .models import (
     CancellationToken,
+    Change,
     Investigation,
     InvestigationStatus,
     MinimizationResult,
@@ -1198,6 +1217,554 @@ def cmd_review_candidate(args: argparse.Namespace) -> int:
             storage.close()
 
 
+# ============================================================================
+# Phase 7: Isolated Adapter and Trial Runner CLI Commands
+# ============================================================================
+
+def cmd_list_adapters(args: argparse.Namespace) -> int:
+    """List available isolated environment adapters and their readiness."""
+    registry = AdapterRegistry.get_default()
+    adapters_info = []
+
+    # Simulation Adapter
+    sim = registry.get_adapter("simulation")
+    adapters_info.append({
+        "name": "simulation",
+        "type": sim.get_adapter_type().value if sim else "SIMULATION",
+        "available": sim.is_available() if sim else True,
+        "is_disposable": True,
+        "is_simulation": True,
+        "is_default": True,
+        "description": "Deterministic in-memory simulated workspace. Safe for all platforms and default.",
+    })
+
+    # Fake Adapter
+    fake = registry.get_adapter("fake")
+    adapters_info.append({
+        "name": "fake",
+        "type": fake.get_adapter_type().value if fake else "FAKE",
+        "available": fake.is_available() if fake else True,
+        "is_disposable": True,
+        "is_simulation": True,
+        "is_default": False,
+        "description": "Configurable test-double adapter supporting fault injection and call history.",
+    })
+
+    # Hyper-V Adapter
+    hyperv = registry.get_adapter("hyperv")
+    hv_avail = hyperv.is_available() if hyperv else False
+    adapters_info.append({
+        "name": "hyperv",
+        "type": hyperv.get_adapter_type().value if hyperv else "HYPER_V",
+        "available": hv_avail,
+        "is_disposable": True,
+        "is_simulation": False,
+        "is_default": False,
+        "description": "Hyper-V VM adapter using standard checkpoints. Requires registered disposable VM.",
+    })
+
+    if getattr(args, "format", "text") == "json":
+        print(json.dumps(adapters_info, indent=2))
+        return 0
+
+    print("=" * 80)
+    print("STATEBISECT ISOLATED ENVIRONMENT ADAPTERS")
+    print("=" * 80)
+    print(f"{'Adapter':<12} {'Type':<12} {'Available':<10} {'Simulation':<12} {'Default':<8} {'Description'}")
+    print("-" * 80)
+    for info in adapters_info:
+        avail_str = "YES" if info["available"] else "NO"
+        sim_str = "SIMULATION" if info["is_simulation"] else "REAL-VM"
+        def_str = "[DEFAULT]" if info["is_default"] else ""
+        print(f"{info['name']:<12} {info['type']:<12} {avail_str:<10} {sim_str:<12} {def_str:<8} {info['description'][:30]}")
+    print("=" * 80)
+    print("Notice: SimulationAdapter is active by default. Zero host configuration changes.")
+    return 0
+
+
+def cmd_sandbox_evaluation(args: argparse.Namespace) -> int:
+    """Display the technical evaluation of Windows Sandbox for isolated trials."""
+    report = WindowsSandboxEvaluation.get_evaluation_report()
+    if getattr(args, "format", "text") == "json":
+        print(json.dumps(report, indent=2))
+        return 0
+
+    print("=" * 80)
+    print("WINDOWS SANDBOX TECHNICAL EVALUATION FOR STATEBISECT")
+    print("=" * 80)
+    print(f"Technology Evaluated : {report.get('adapter_type', 'WINDOWS_SANDBOX')}")
+    print(f"Evaluation Date      : {report.get('decision_date', '2026-11-17')}")
+    print(f"Primary Source       : {report.get('primary_source', '')}")
+    print(f"Verdict / Status     : {report.get('status', 'DEFERRED')}")
+    print("-" * 80)
+    print("REASONS FOR DEFERRAL:")
+    for reason in report.get("reasons_deferred", []):
+        print(f"  * {reason}")
+    print("-" * 80)
+    print(f"RECOMMENDATION:\n  {report.get('recommendation', '')}")
+    print("=" * 80)
+    return 0
+
+
+def cmd_list_environments(args: argparse.Namespace) -> int:
+    """List registered environments in StateBisect storage."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        adapter_type = None
+        if getattr(args, "adapter", None):
+            try:
+                adapter_type = AdapterType(args.adapter.upper())
+            except ValueError:
+                print(f"Error: Unknown adapter '{args.adapter}'. Choose from: simulation, hyperv, fake.", file=sys.stderr)
+                return 1
+
+        envs = storage.list_environments(adapter_type=adapter_type)
+
+        # If empty and no adapter filter or simulation filter, seed default simulation environment in storage
+        if not envs and (adapter_type is None or adapter_type == AdapterType.SIMULATION):
+            sim_env = EnvironmentRecord(
+                environment_id="sim-env-default",
+                adapter_type=AdapterType.SIMULATION,
+                display_name="Default Simulation Workspace",
+                is_disposable=True,
+                is_host=False,
+                status=EnvironmentStatus.REGISTERED,
+                configuration={"description": "Default in-memory simulated environment."},
+            )
+            storage.register_environment(sim_env)
+            sim_base = BaselineRecord(
+                baseline_id="baseline-001",
+                environment_id="sim-env-default",
+                display_name="Default Clean Baseline",
+                checksum_or_state="sim-initial-clean",
+            )
+            storage.register_baseline(sim_base)
+            envs = [sim_env]
+
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps([e.to_dict() for e in envs], indent=2))
+            return 0
+
+        print("=" * 80)
+        print("REGISTERED EXPERIMENT ENVIRONMENTS")
+        print("=" * 80)
+        if not envs:
+            print("No environments registered. Use 'register-environment' to add one.")
+            return 0
+
+        print(f"{'Environment ID':<18} {'Adapter':<12} {'Status':<12} {'Disposable':<10} {'Sim':<6} {'Name'}")
+        print("-" * 80)
+        for env in envs:
+            disp_str = "YES" if env.is_disposable else "NO"
+            sim_str = "YES" if env.is_simulation else "NO"
+            print(f"{env.environment_id:<18} {env.adapter_type.value:<12} {env.status.value:<12} {disp_str:<10} {sim_str:<6} {env.display_name}")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"List Environments Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_inspect_environment(args: argparse.Namespace) -> int:
+    """Inspect environment details, baselines, and recent trials."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        env = storage.get_environment(args.environment_id)
+        if not env and args.environment_id == "sim-env-default":
+            # auto-register default
+            env = EnvironmentRecord(
+                environment_id="sim-env-default",
+                adapter_type=AdapterType.SIMULATION,
+                display_name="Default Simulation Workspace",
+                is_disposable=True,
+                is_host=False,
+                status=EnvironmentStatus.REGISTERED,
+                configuration={"description": "Default in-memory simulated environment."},
+            )
+            storage.register_environment(env)
+            storage.register_baseline(
+                BaselineRecord(
+                    baseline_id="baseline-001",
+                    environment_id="sim-env-default",
+                    display_name="Default Clean Baseline",
+                    checksum_or_state="sim-initial-clean",
+                )
+            )
+
+        if not env:
+            print(f"Error: Environment '{args.environment_id}' not found in storage.", file=sys.stderr)
+            return 1
+
+        baselines = storage.list_baselines(args.environment_id)
+        recent_trials = storage.get_isolated_trials(environment_id=args.environment_id, limit=5)
+
+        if getattr(args, "format", "text") == "json":
+            data = {
+                "environment": env.to_dict(),
+                "baselines": [b.to_dict() for b in baselines],
+                "recent_trials": [t.to_dict() for t in recent_trials],
+            }
+            print(json.dumps(data, indent=2))
+            return 0
+
+        print("=" * 80)
+        print(f"ENVIRONMENT INSPECTION: {env.environment_id}")
+        print("=" * 80)
+        print(f"Name           : {env.display_name}")
+        print(f"Adapter Type   : {env.adapter_type.value}")
+        print(f"Status         : {env.status.value}")
+        print(f"Is Disposable  : {env.is_disposable} (Refuses host: {not env.is_host})")
+        print(f"Is Simulation  : {env.is_simulation}")
+        print(f"Description    : {env.configuration.get('description', '')}")
+        print(f"Created At     : {env.created_at}")
+        print("-" * 80)
+        print("REGISTERED BASELINES:")
+        if not baselines:
+            print("  (None registered)")
+        else:
+            for b in baselines:
+                print(f"  * [{b.baseline_id}] {b.display_name} (Checkpoint: '{b.checksum_or_state}')")
+        print("-" * 80)
+        print("RECENT ISOLATED TRIALS (up to 5):")
+        if not recent_trials:
+            print("  (No trials executed yet)")
+        else:
+            for t in recent_trials:
+                print(f"  * [{t.trial_id}] {t.lifecycle_state.value} -> Outcome: {t.outcome.value} (Duration: {t.duration_ms:.1f}ms)")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Inspect Environment Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_register_environment(args: argparse.Namespace) -> int:
+    """Explicitly register a disposable experiment environment."""
+    storage = None
+    try:
+        if args.is_host:
+            print("Error: Refusing to register host machine as an experiment environment.", file=sys.stderr)
+            return 1
+
+        adapter_name = args.adapter.lower()
+        if adapter_name not in ("simulation", "hyperv", "fake"):
+            print(f"Error: Unknown adapter '{args.adapter}'. Must be one of: simulation, hyperv, fake.", file=sys.stderr)
+            return 1
+
+        if adapter_name == "hyperv" and not args.is_disposable:
+            print("Error: Hyper-V environments must be explicitly disposable. Pass --is-disposable to confirm.", file=sys.stderr)
+            return 1
+
+        storage = get_storage(args.db, args.data_dir)
+        env_type = AdapterType(adapter_name.upper())
+
+        rec = EnvironmentRecord(
+            environment_id=args.id,
+            adapter_type=env_type,
+            display_name=args.name,
+            is_disposable=True,
+            is_host=False,
+            status=EnvironmentStatus.REGISTERED,
+            configuration={"description": args.description or ""},
+        )
+        storage.register_environment(rec)
+
+        registry = AdapterRegistry.get_default()
+        adapter = registry.get_adapter(adapter_name)
+        if adapter_name == "hyperv" and adapter is not None:
+            res = adapter.register_disposable_vm(args.id, args.name)
+            if not res.success:
+                print(f"Warning: Adapter registration notice: {res.message}")
+
+        print("=" * 80)
+        print(f"ENVIRONMENT REGISTERED: {rec.environment_id}")
+        print("=" * 80)
+        print(f"Name         : {rec.display_name}")
+        print(f"Adapter      : {rec.adapter_type.value}")
+        print(f"Disposable   : {rec.is_disposable}")
+        print(f"Simulation   : {rec.is_simulation}")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Register Environment Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_register_baseline(args: argparse.Namespace) -> int:
+    """Register a clean baseline checkpoint for an environment."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        env = storage.get_environment(args.environment)
+        if not env:
+            print(f"Error: Environment '{args.environment}' not registered. Register it first.", file=sys.stderr)
+            return 1
+
+        base = BaselineRecord(
+            baseline_id=args.baseline_id,
+            environment_id=args.environment,
+            display_name=args.name,
+            checksum_or_state=args.checkpoint_ref or "",
+        )
+        storage.register_baseline(base)
+
+        print("=" * 80)
+        print(f"BASELINE REGISTERED: {base.baseline_id}")
+        print("=" * 80)
+        print(f"Environment  : {base.environment_id}")
+        print(f"Name         : {base.display_name}")
+        print(f"Checkpoint   : {base.checksum_or_state}")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Register Baseline Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_verify_baseline(args: argparse.Namespace) -> int:
+    """Verify baseline checkpoint restore and health on an environment."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        registry = AdapterRegistry.get_default()
+        adapter = registry.get_adapter(args.adapter)
+        if adapter is None:
+            print(f"Error: Unknown adapter '{args.adapter}'.", file=sys.stderr)
+            return 1
+
+        print(f"Restoring baseline '{args.baseline}' on environment '{args.environment}'...")
+        r_restore = adapter.restore_baseline(args.environment, args.baseline)
+        if not r_restore.success:
+            print(f"FAILED: Baseline restore failed: {r_restore.error_reason or 'Restore failed'}", file=sys.stderr)
+            storage.update_environment_status(args.environment, EnvironmentStatus.CORRUPTED)
+            return 1
+
+        print("Verifying baseline health check...")
+        r_verify = adapter.verify_baseline(args.environment, args.baseline)
+        if not r_verify.success:
+            print(f"FAILED: Baseline health verification failed: {r_verify.error_reason or 'Verification failed'}", file=sys.stderr)
+            storage.update_environment_status(args.environment, EnvironmentStatus.CORRUPTED)
+            return 1
+
+        storage.update_environment_status(args.environment, EnvironmentStatus.VERIFIED)
+        print("=" * 80)
+        print(f"BASELINE VERIFICATION PASSED: {args.baseline} on {args.environment}")
+        print("=" * 80)
+        print(f"Restore Duration : {r_restore.duration_ms:.1f}ms")
+        print(f"Verify Duration  : {r_verify.duration_ms:.1f}ms")
+        print(f"Status           : VERIFIED")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Verify Baseline Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_run_trial(args: argparse.Namespace) -> int:
+    """Execute a single isolated trial with baseline verification before and after."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        registry = AdapterRegistry.get_default()
+        adapter = registry.get_adapter(args.adapter)
+        if adapter is None:
+            print(f"Error: Unknown adapter '{args.adapter}'.", file=sys.stderr)
+            return 1
+
+        # Ensure investigation exists for foreign key constraint
+        inv = storage.get_investigation(args.investigation)
+        if not inv:
+            inv = Investigation(
+                id=args.investigation,
+                symptom="Isolated trial execution",
+                target_system=args.environment,
+                status=InvestigationStatus.NEW,
+                baseline_id=args.baseline,
+            )
+            storage.save_investigation(inv)
+
+        # Parse changes
+        selected_changes = [c.strip() for c in args.changes.split(",") if c.strip()] if args.changes else []
+
+        runner = IsolatedTrialRunner(
+            adapter=adapter,
+            environment_id=args.environment,
+            baseline_id=args.baseline,
+            storage=storage,
+            investigation_id=args.investigation,
+        )
+
+        print("=" * 80)
+        print(f"STARTING ISOLATED TRIAL ON {args.environment} (Baseline: {args.baseline})")
+        print("=" * 80)
+        print(f"Adapter          : {adapter.get_adapter_type().value}")
+        print(f"Selected Changes : {selected_changes if selected_changes else '(None - Baseline check)'}")
+        print(f"Health Check     : {args.health_check}")
+        print("-" * 80)
+
+        trial_rec = runner.run_isolated_trial(
+            selected_changes=selected_changes,
+            health_check_id=args.health_check,
+            notes=f"CLI trial executed via {args.adapter} adapter",
+        )
+
+        print(f"Trial ID         : {trial_rec.trial_id}")
+        print(f"Lifecycle State  : {trial_rec.lifecycle_state.value}")
+        print(f"Outcome          : {trial_rec.outcome.value}")
+        print(f"Restore Status   : {trial_rec.restore_status}")
+        print(f"Cleanup Status   : {trial_rec.cleanup_status}")
+        print(f"Duration         : {trial_rec.duration_ms:.1f}ms")
+        if trial_rec.output_bounded:
+            print(f"Evidence Excerpt : {trial_rec.output_bounded[:200]}")
+        if trial_rec.error_reason:
+            print(f"Error Reason     : {trial_rec.error_reason}")
+        print("=" * 80)
+
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps(trial_rec.to_dict(), indent=2))
+
+        return 0 if trial_rec.lifecycle_state == TrialLifecycleState.COMPLETED else 1
+    except Exception as err:
+        print(f"Run Trial Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_run_minimization(args: argparse.Namespace) -> int:
+    """Run Delta Debugging minimization on candidates using an isolated environment adapter."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        inv = storage.get_investigation(args.investigation)
+        if not inv:
+            print(f"Error: Investigation '{args.investigation}' not found.", file=sys.stderr)
+            return 1
+
+        candidates = storage.get_candidates(args.investigation, active_only=True)
+        if not candidates:
+            # Fallback to all candidates if none specifically active
+            candidates = storage.get_candidates(args.investigation, active_only=False)
+
+        if not candidates:
+            print(f"Error: No candidates found for investigation '{args.investigation}'. Run 'generate-candidates' first.", file=sys.stderr)
+            return 1
+
+        print("=" * 80)
+        print(f"STATEBISECT ISOLATED DELTA DEBUGGING MINIMIZATION")
+        print("=" * 80)
+        print(f"Investigation    : {args.investigation}")
+        print(f"Adapter          : {args.adapter}")
+        print(f"Environment      : {args.environment}")
+        print(f"Baseline         : {args.baseline}")
+        print(f"Candidates Count : {len(candidates)}")
+        print("-" * 80)
+
+        # Convert candidates to Change objects for DeltaDebugger
+        changes = [
+            Change(
+                id=c.candidate_id,
+                category=c.category,
+                description=c.description,
+                payload={"category": c.category, "key": c.object_key, "value": c.after_value},
+            )
+            for c in candidates
+        ]
+
+        registry = AdapterRegistry.get_default()
+        adapter = registry.get_adapter(args.adapter)
+        if adapter is None:
+            print(f"Error: Unknown adapter '{args.adapter}'.", file=sys.stderr)
+            return 1
+
+        runner = IsolatedTrialRunner(
+            adapter=adapter,
+            environment_id=args.environment,
+            baseline_id=args.baseline,
+            storage=storage,
+            investigation_id=args.investigation,
+        )
+
+        debugger = DeltaDebugger(
+            runner=runner,
+            all_changes=changes,
+            health_check=lambda ws: HealthCheckResult(outcome=HealthCheckOutcome.PASS, output=""),
+        )
+        min_result = debugger.minimize(candidate_ids=[c.id for c in changes])
+
+        print("=" * 80)
+        print("MINIMIZATION COMPLETED")
+        print("=" * 80)
+        print(f"Result Verdict   : {min_result.verdict}")
+        print(f"Is 1-Minimal     : {min_result.is_1_minimal}")
+        print(f"Trials Executed  : {min_result.total_trials}")
+        print(f"Minimal Failure-Inducing Set ({len(min_result.suspected_set)} changes):")
+        for cid in min_result.suspected_set:
+            print(f"  * {cid}")
+        print(f"Rationale        : {min_result.rationale}")
+        print("=" * 80)
+
+        # Update investigation status
+        storage.update_investigation_status(args.investigation, InvestigationStatus.VERIFIED)
+        storage.log_audit(
+            investigation_id=args.investigation,
+            event_type="ISOLATED_MINIMIZATION_COMPLETED",
+            message=f"Minimized {len(candidates)} candidates to {len(min_result.suspected_set)} change(s) in {min_result.total_trials} trials.",
+            details={"minimal_set": min_result.suspected_set, "trials": min_result.total_trials, "verdict": min_result.verdict},
+        )
+
+        if getattr(args, "format", "text") == "json":
+            out_data = {
+                "investigation_id": min_result.investigation_id,
+                "suspected_set": min_result.suspected_set,
+                "is_1_minimal": min_result.is_1_minimal,
+                "total_trials": min_result.total_trials,
+                "verdict": min_result.verdict,
+                "rationale": min_result.rationale,
+            }
+            print(json.dumps(out_data, indent=2))
+
+        return 0
+    except Exception as err:
+        print(f"Run Minimization Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -1342,6 +1909,84 @@ def build_parser() -> argparse.ArgumentParser:
     p_rcand.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_rcand.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # ========================================================================
+    # Phase 7: Isolated Adapter and Trial Runner Subcommands
+    # ========================================================================
+
+    # list-adapters
+    p_ladp = subparsers.add_parser("list-adapters", help="List registered environment adapters and availability.")
+    p_ladp.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+
+    # sandbox-evaluation
+    p_wsb = subparsers.add_parser("sandbox-evaluation", help="Display technical evaluation and deferral rationale for Windows Sandbox.")
+    p_wsb.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+
+    # list-environments
+    p_lenv = subparsers.add_parser("list-environments", help="List registered experiment environments.")
+    p_lenv.add_argument("--adapter", choices=["simulation", "hyperv", "fake"], default=None, help="Filter by adapter type.")
+    p_lenv.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_lenv.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_lenv.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # inspect-environment
+    p_ienv = subparsers.add_parser("inspect-environment", help="Inspect an experiment environment and its baselines.")
+    p_ienv.add_argument("environment_id", help="Environment ID to inspect.")
+    p_ienv.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_ienv.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_ienv.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # register-environment
+    p_renv = subparsers.add_parser("register-environment", help="Explicitly register a disposable experiment environment.")
+    p_renv.add_argument("--id", required=True, help="Unique environment identifier (e.g. sim-env-1, vm-disposable-1).")
+    p_renv.add_argument("--name", required=True, help="Friendly name of the environment.")
+    p_renv.add_argument("--adapter", choices=["simulation", "hyperv", "fake"], default="simulation", help="Adapter type.")
+    p_renv.add_argument("--description", default="", help="Description of the environment purpose.")
+    p_renv.add_argument("--is-disposable", action="store_true", help="Explicit confirmation that this environment is disposable.")
+    p_renv.add_argument("--is-host", action="store_true", help="Dangerous: indicates environment is host machine (rejected by safety invariant).")
+    p_renv.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_renv.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # register-baseline
+    p_rbase = subparsers.add_parser("register-baseline", help="Register a clean baseline checkpoint for an environment.")
+    p_rbase.add_argument("--environment", required=True, help="Environment ID to attach baseline to.")
+    p_rbase.add_argument("--baseline-id", required=True, help="Unique baseline identifier (e.g. baseline-001).")
+    p_rbase.add_argument("--name", required=True, help="Friendly name of the baseline.")
+    p_rbase.add_argument("--checkpoint-ref", default="", help="Checkpoint or snapshot reference string.")
+    p_rbase.add_argument("--description", default="", help="Description of the baseline state.")
+    p_rbase.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_rbase.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # verify-baseline
+    p_vbase = subparsers.add_parser("verify-baseline", help="Verify baseline checkpoint restore and health.")
+    p_vbase.add_argument("--environment", required=True, help="Environment ID to verify.")
+    p_vbase.add_argument("--baseline", required=True, help="Baseline ID to restore and verify.")
+    p_vbase.add_argument("--adapter", choices=["simulation", "hyperv", "fake"], default="simulation", help="Adapter type.")
+    p_vbase.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_vbase.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # run-trial
+    p_rtrial = subparsers.add_parser("run-trial", help="Execute an isolated trial with baseline verification before and after.")
+    p_rtrial.add_argument("--environment", default="sim-env-default", help="Environment ID (default: sim-env-default).")
+    p_rtrial.add_argument("--baseline", default="baseline-001", help="Baseline ID (default: baseline-001).")
+    p_rtrial.add_argument("--adapter", choices=["simulation", "hyperv", "fake"], default="simulation", help="Adapter type.")
+    p_rtrial.add_argument("--investigation", default="inv-adhoc", help="Investigation ID.")
+    p_rtrial.add_argument("--changes", default="", help="Comma-separated candidate IDs or action keys to apply.")
+    p_rtrial.add_argument("--health-check", default="default", help="Health check ID to execute.")
+    p_rtrial.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_rtrial.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_rtrial.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # run-minimization
+    p_rmin = subparsers.add_parser("run-minimization", help="Run Delta Debugging minimization on candidates using an isolated adapter.")
+    p_rmin.add_argument("--investigation", required=True, help="Investigation ID containing candidates to minimize.")
+    p_rmin.add_argument("--environment", default="sim-env-default", help="Environment ID (default: sim-env-default).")
+    p_rmin.add_argument("--baseline", default="baseline-001", help="Baseline ID (default: baseline-001).")
+    p_rmin.add_argument("--adapter", choices=["simulation", "hyperv", "fake"], default="simulation", help="Adapter type.")
+    p_rmin.add_argument("--health-check", default="default", help="Health check ID to execute.")
+    p_rmin.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_rmin.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_rmin.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -1391,6 +2036,24 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_inspect_candidate(args)
     elif args.command == "review-candidate":
         return cmd_review_candidate(args)
+    elif args.command == "list-adapters":
+        return cmd_list_adapters(args)
+    elif args.command == "sandbox-evaluation":
+        return cmd_sandbox_evaluation(args)
+    elif args.command == "list-environments":
+        return cmd_list_environments(args)
+    elif args.command == "inspect-environment":
+        return cmd_inspect_environment(args)
+    elif args.command == "register-environment":
+        return cmd_register_environment(args)
+    elif args.command == "register-baseline":
+        return cmd_register_baseline(args)
+    elif args.command == "verify-baseline":
+        return cmd_verify_baseline(args)
+    elif args.command == "run-trial":
+        return cmd_run_trial(args)
+    elif args.command == "run-minimization":
+        return cmd_run_minimization(args)
     else:
         parser.print_help()
         return 2

@@ -33,6 +33,14 @@ from .correlation.models import (
     CandidateReviewStatus,
     ScoreBreakdown,
 )
+from .adapters.models import (
+    AdapterType,
+    BaselineRecord,
+    EnvironmentRecord,
+    EnvironmentStatus,
+    IsolatedTrialRecord,
+    TrialLifecycleState,
+)
 from .monitor.models import (
     EventConfidence,
     MonitoringCoverageGap,
@@ -42,7 +50,7 @@ from .monitor.models import (
     ProcessProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 
 class Storage:
@@ -465,6 +473,72 @@ class Storage:
                     """
                 )
                 current_ver = 6
+
+            # Migration 7: Phase 7 Isolated Experiment Adapters, Environments, and Trials
+            if current_ver < 7:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS registered_environments (
+                        environment_id TEXT PRIMARY KEY,
+                        adapter_type TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        is_disposable INTEGER NOT NULL,
+                        is_host INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        baseline_ids_json TEXT NOT NULL,
+                        configuration_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_environments_adapter 
+                    ON registered_environments(adapter_type);
+
+                    CREATE TABLE IF NOT EXISTS registered_baselines (
+                        baseline_id TEXT NOT NULL,
+                        environment_id TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        is_verified INTEGER NOT NULL,
+                        checksum_or_state TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (environment_id, baseline_id),
+                        FOREIGN KEY (environment_id) REFERENCES registered_environments(environment_id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS isolated_trials (
+                        trial_id TEXT PRIMARY KEY,
+                        investigation_id TEXT NOT NULL,
+                        environment_id TEXT NOT NULL,
+                        baseline_id TEXT NOT NULL,
+                        adapter_type TEXT NOT NULL,
+                        lifecycle_state TEXT NOT NULL,
+                        is_simulation INTEGER NOT NULL,
+                        selected_changes_json TEXT NOT NULL,
+                        start_time TEXT NOT NULL,
+                        finish_time TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        output_bounded TEXT NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        restore_status TEXT NOT NULL,
+                        verify_status TEXT NOT NULL,
+                        apply_status TEXT NOT NULL,
+                        test_status TEXT NOT NULL,
+                        cleanup_status TEXT NOT NULL,
+                        error_reason TEXT,
+                        evidence_json TEXT NOT NULL,
+                        FOREIGN KEY (investigation_id) REFERENCES investigations(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_isolated_trials_inv 
+                    ON isolated_trials(investigation_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_isolated_trials_env 
+                    ON isolated_trials(environment_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (7, datetime('now'), 'Add Phase 7 isolated environments, baselines, and trial executions');
+                    """
+                )
+                current_ver = 7
 
     def log_audit(
         self,
@@ -1353,3 +1427,236 @@ class Storage:
             )
             for r in rows
         ]
+
+    # --- Phase 7 Isolated Environments, Baselines & Trials ---
+
+    def register_environment(self, env: EnvironmentRecord) -> None:
+        """Persist or update an explicitly registered experiment environment."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO registered_environments (
+                    environment_id, adapter_type, display_name, is_disposable,
+                    is_host, status, baseline_ids_json, configuration_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(environment_id) DO UPDATE SET
+                    display_name=excluded.display_name,
+                    status=excluded.status,
+                    baseline_ids_json=excluded.baseline_ids_json,
+                    configuration_json=excluded.configuration_json
+                """,
+                (
+                    env.environment_id,
+                    env.adapter_type.value,
+                    env.display_name,
+                    1 if env.is_disposable else 0,
+                    1 if env.is_host else 0,
+                    env.status.value,
+                    json.dumps(env.baseline_ids),
+                    json.dumps(env.configuration),
+                    env.created_at,
+                ),
+            )
+
+    def get_environment(self, environment_id: str) -> EnvironmentRecord | None:
+        """Fetch a registered environment by its ID."""
+        row = self._conn.execute(
+            "SELECT * FROM registered_environments WHERE environment_id = ?",
+            (environment_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return EnvironmentRecord(
+            environment_id=row["environment_id"],
+            adapter_type=AdapterType(row["adapter_type"]),
+            display_name=row["display_name"],
+            is_disposable=bool(row["is_disposable"]),
+            is_host=bool(row["is_host"]),
+            status=EnvironmentStatus(row["status"]),
+            baseline_ids=json.loads(row["baseline_ids_json"]),
+            configuration=json.loads(row["configuration_json"]),
+            created_at=row["created_at"],
+        )
+
+    def list_environments(self, adapter_type: str | None = None) -> list[EnvironmentRecord]:
+        """List registered environments, optionally filtered by adapter type."""
+        query = "SELECT * FROM registered_environments"
+        params: list[Any] = []
+        if adapter_type:
+            query += " WHERE adapter_type = ?"
+            params.append(adapter_type.upper())
+        query += " ORDER BY created_at ASC"
+
+        rows = self._conn.execute(query, params).fetchall()
+        return [
+            EnvironmentRecord(
+                environment_id=r["environment_id"],
+                adapter_type=AdapterType(r["adapter_type"]),
+                display_name=r["display_name"],
+                is_disposable=bool(r["is_disposable"]),
+                is_host=bool(r["is_host"]),
+                status=EnvironmentStatus(r["status"]),
+                baseline_ids=json.loads(r["baseline_ids_json"]),
+                configuration=json.loads(r["configuration_json"]),
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    def update_environment_status(self, environment_id: str, status: EnvironmentStatus) -> None:
+        """Update lifecycle/integrity status of an environment."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE registered_environments SET status = ? WHERE environment_id = ?",
+                (status.value, environment_id),
+            )
+
+    def register_baseline(self, baseline: BaselineRecord) -> None:
+        """Persist or update a registered baseline / checkpoint record."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO registered_baselines (
+                    baseline_id, environment_id, display_name, is_verified, checksum_or_state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(environment_id, baseline_id) DO UPDATE SET
+                    display_name=excluded.display_name,
+                    is_verified=excluded.is_verified,
+                    checksum_or_state=excluded.checksum_or_state
+                """,
+                (
+                    baseline.baseline_id,
+                    baseline.environment_id,
+                    baseline.display_name,
+                    1 if baseline.is_verified else 0,
+                    baseline.checksum_or_state,
+                    baseline.created_at,
+                ),
+            )
+
+    def get_baseline(self, environment_id: str, baseline_id: str) -> BaselineRecord | None:
+        """Fetch a registered baseline by environment ID and baseline ID."""
+        row = self._conn.execute(
+            "SELECT * FROM registered_baselines WHERE environment_id = ? AND baseline_id = ?",
+            (environment_id, baseline_id),
+        ).fetchone()
+        if not row:
+            return None
+        return BaselineRecord(
+            baseline_id=row["baseline_id"],
+            environment_id=row["environment_id"],
+            display_name=row["display_name"],
+            is_verified=bool(row["is_verified"]),
+            checksum_or_state=row["checksum_or_state"],
+            created_at=row["created_at"],
+        )
+
+    def list_baselines(self, environment_id: str) -> list[BaselineRecord]:
+        """List registered baselines for an environment."""
+        rows = self._conn.execute(
+            "SELECT * FROM registered_baselines WHERE environment_id = ? ORDER BY created_at ASC",
+            (environment_id,),
+        ).fetchall()
+        return [
+            BaselineRecord(
+                baseline_id=r["baseline_id"],
+                environment_id=r["environment_id"],
+                display_name=r["display_name"],
+                is_verified=bool(r["is_verified"]),
+                checksum_or_state=r["checksum_or_state"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    def save_isolated_trial(self, trial: IsolatedTrialRecord) -> None:
+        """Persist an isolated trial execution audit record."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO isolated_trials (
+                    trial_id, investigation_id, environment_id, baseline_id,
+                    adapter_type, lifecycle_state, is_simulation, selected_changes_json,
+                    start_time, finish_time, outcome, output_bounded, duration_ms,
+                    restore_status, verify_status, apply_status, test_status,
+                    cleanup_status, error_reason, evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trial_id) DO UPDATE SET
+                    lifecycle_state=excluded.lifecycle_state,
+                    finish_time=excluded.finish_time,
+                    outcome=excluded.outcome,
+                    output_bounded=excluded.output_bounded,
+                    duration_ms=excluded.duration_ms,
+                    restore_status=excluded.restore_status,
+                    verify_status=excluded.verify_status,
+                    apply_status=excluded.apply_status,
+                    test_status=excluded.test_status,
+                    cleanup_status=excluded.cleanup_status,
+                    error_reason=excluded.error_reason,
+                    evidence_json=excluded.evidence_json
+                """,
+                (
+                    trial.trial_id,
+                    trial.investigation_id,
+                    trial.environment_id,
+                    trial.baseline_id,
+                    trial.adapter_type.value,
+                    trial.lifecycle_state.value,
+                    1 if trial.is_simulation else 0,
+                    json.dumps(trial.selected_change_ids),
+                    trial.start_time,
+                    trial.finish_time,
+                    trial.outcome.value,
+                    trial.output_bounded,
+                    trial.duration_ms,
+                    trial.restore_status,
+                    trial.verify_status,
+                    trial.apply_status,
+                    trial.test_status,
+                    trial.cleanup_status,
+                    trial.error_reason,
+                    json.dumps(trial.evidence_data),
+                ),
+            )
+
+    def get_isolated_trials(self, investigation_id: str) -> list[IsolatedTrialRecord]:
+        """Fetch isolated trial records for an investigation."""
+        rows = self._conn.execute(
+            "SELECT * FROM isolated_trials WHERE investigation_id = ? ORDER BY start_time ASC",
+            (investigation_id,),
+        ).fetchall()
+        return [self._row_to_isolated_trial(r) for r in rows]
+
+    def get_isolated_trial(self, trial_id: str) -> IsolatedTrialRecord | None:
+        """Fetch a single isolated trial record by ID."""
+        row = self._conn.execute(
+            "SELECT * FROM isolated_trials WHERE trial_id = ?",
+            (trial_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_isolated_trial(row)
+
+    def _row_to_isolated_trial(self, row: sqlite3.Row) -> IsolatedTrialRecord:
+        return IsolatedTrialRecord(
+            trial_id=row["trial_id"],
+            investigation_id=row["investigation_id"],
+            environment_id=row["environment_id"],
+            baseline_id=row["baseline_id"],
+            adapter_type=AdapterType(row["adapter_type"]),
+            lifecycle_state=TrialLifecycleState(row["lifecycle_state"]),
+            is_simulation=bool(row["is_simulation"]),
+            selected_change_ids=json.loads(row["selected_changes_json"]),
+            start_time=row["start_time"],
+            finish_time=row["finish_time"],
+            outcome=HealthCheckOutcome(row["outcome"]),
+            output_bounded=row["output_bounded"],
+            duration_ms=row["duration_ms"],
+            restore_status=row["restore_status"],
+            verify_status=row["verify_status"],
+            apply_status=row["apply_status"],
+            test_status=row["test_status"],
+            cleanup_status=row["cleanup_status"],
+            error_reason=row["error_reason"],
+            evidence_data=json.loads(row["evidence_json"]) if row["evidence_json"] else {},
+        )
