@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0.0",
+  "id": "scenario-repeated-consistency",
+  "name": "Repeated Consistency Protocol Verification",
+  "description": "Verifies that multi-attempt health checks execute repeatedly and require strict consistency.",
+  "simulation": true,
+  "baseline": {
+    "baseline_id": "baseline-rep-01",
+    "initial_state": {
+      "service_active": true,
+      "max_workers": 8,
+      "memory_cap_mb": 512,
+      "queue_depth": 100
+    }
+  },
+  "changes": [
+    {
+      "id": "C1",
+      "category": "performance",
+      "description": "Increase worker threads to 16",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "max_workers", "value": 16 }
+    },
+    {
+      "id": "C2",
+      "category": "performance",
+      "description": "Lower memory cap to 256MB",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "memory_cap_mb", "value": 256 }
+    },
+    {
+      "id": "C3",
+      "category": "service",
+      "description": "Deactivate background service",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "service_active", "value": false }
+    },
+    {
+      "id": "C4",
+      "category": "queue",
+      "description": "Expand queue depth to 200",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "queue_depth", "value": 200 }
+    }
+  ],
+  "health_check": {
+    "type": "simulated_state",
+    "version": "1.0.0",
+    "name": "Service Active Multi-Attempt Check",
+    "description": "Runs 3 attempts per trial requiring strict consistency",
+    "parameters": {
+      "key": "service_active",
+      "expected_value": false
+    },
+    "timeout_ms": 3000,
+    "repeat_count": 3,
+    "required_consistency": "ALL_MATCH"
+  },
+  "expected_outcome": "FAIL"
+}

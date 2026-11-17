@@ -35,12 +35,15 @@ def generate_text_report(investigation: Investigation, result: MinimizationResul
     lines.append(f"Rationale        : {result.rationale}")
     lines.append("--------------------------------------------------------------------------------")
     lines.append("EXPERIMENT TRIAL AUDIT MATRIX")
-    lines.append(f"{'Trial ID':<16} {'Outcome':<14} {'Duration(ms)':<14} {'Selected Changes':<24} {'Health Output'}")
+    lines.append(
+        f"{'Trial ID':<16} {'Outcome':<14} {'Duration(ms)':<14} {'Atts':<6} {'Selected Changes':<20} {'Health Output'}"
+    )
     lines.append("-" * 80)
     for trial in result.trials:
         changes_str = ",".join(trial.selected_change_ids) if trial.selected_change_ids else "<baseline>"
+        atts_count = len(trial.attempts) if trial.attempts else 1
         lines.append(
-            f"{trial.trial_id:<16} {trial.outcome.value:<14} {trial.duration_ms:<14.2f} {changes_str:<24} {trial.health_output[:30]}"
+            f"{trial.trial_id:<16} {trial.outcome.value:<14} {trial.duration_ms:<14.2f} {atts_count:<6} {changes_str:<20} {trial.health_output[:25]}"
         )
     lines.append("--------------------------------------------------------------------------------")
     lines.append("SCOPE & LIMITATIONS")
@@ -95,6 +98,26 @@ def generate_json_report(investigation: Investigation, result: MinimizationResul
                 "start_time": t.start_time,
                 "finish_time": t.finish_time,
                 "notes": t.notes,
+                "check_type": t.check_type,
+                "check_version": t.check_version,
+                "parameters_hash": t.parameters_hash,
+                "attempts": [
+                    {
+                        "attempt_number": att.attempt_number,
+                        "outcome": att.outcome.value,
+                        "start_time": att.start_time,
+                        "finish_time": att.finish_time,
+                        "duration_ms": att.duration_ms,
+                        "exit_code": att.exit_code,
+                        "expected_value": att.expected_value,
+                        "observed_value": att.observed_value,
+                        "bounded_evidence": att.bounded_evidence,
+                        "error_reason": att.error_reason,
+                        "is_truncated": att.is_truncated,
+                        "is_redacted": att.is_redacted,
+                    }
+                    for att in t.attempts
+                ],
             }
             for t in result.trials
         ],

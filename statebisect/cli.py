@@ -176,6 +176,9 @@ def cmd_inspect_investigation(args: argparse.Namespace) -> int:
                         "outcome": t.outcome.value,
                         "selected_changes": t.selected_change_ids,
                         "duration_ms": t.duration_ms,
+                        "check_type": t.check_type,
+                        "check_version": t.check_version,
+                        "attempts_count": len(t.attempts),
                         "health_output": t.health_output,
                     }
                     for t in trials
@@ -210,7 +213,8 @@ def cmd_inspect_investigation(args: argparse.Namespace) -> int:
         print(f"TRIALS RECORDED : {len(trials)}")
         for t in trials:
             c_str = ",".join(t.selected_change_ids) if t.selected_change_ids else "<baseline>"
-            print(f"  {t.trial_id:<14} {t.outcome.value:<12} {t.duration_ms:>6.2f}ms  [{c_str}]")
+            atts_str = f"({len(t.attempts)} atts)" if t.attempts else "(1 att)"
+            print(f"  {t.trial_id:<14} {t.outcome.value:<12} {t.duration_ms:>6.2f}ms  {atts_str:<9} [{c_str}]")
         print("-" * 80)
         print(f"AUDIT LOG EVENTS: {len(audit_logs)}")
         for log in audit_logs:

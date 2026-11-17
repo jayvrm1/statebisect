@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .health_checks.base import BaseHealthCheck
+from .health_checks.registry import (
+    SUPPORTED_CHECK_TYPES,
+    SUPPORTED_CHECK_VERSIONS,
+    create_health_check,
+)
+
 CURRENT_SCHEMA_VERSION = "1.0.0"
 ALLOWED_OPERATIONS = frozenset(["set_key", "delete_key", "append_list", "replace_value"])
-ALLOWED_HEALTH_CHECK_TYPES = frozenset(["key_value_match", "compound_condition"])
 FORBIDDEN_EXECUTABLE_KEYS = frozenset(
     ["command", "cmd", "script", "exec", "eval", "powershell", "bash", "code", "shell", "run"]
 )
+LOOPBACK_HOSTS = frozenset(["localhost", "127.0.0.1", "::1", "[::1]"])
 
 
 class ScenarioValidationError(Exception):
@@ -33,8 +41,13 @@ class ScenarioChange:
 @dataclass(frozen=True)
 class ScenarioHealthCheck:
     type: str
-    parameters: dict[str, Any]
+    version: str = "1.0.0"
+    name: str = ""
+    description: str = ""
+    parameters: dict[str, Any] = field(default_factory=dict)
     timeout_ms: int = 5000
+    repeat_count: int = 1
+    required_consistency: str = "ALL_MATCH"
 
 
 @dataclass(frozen=True)
@@ -226,16 +239,22 @@ def validate_and_parse_scenario(data: dict[str, Any], raw_json: str = "") -> Dec
         raise ScenarioValidationError("Scenario must specify a 'health_check' dictionary.")
 
     hc_type = hc_raw.get("type")
-    if not hc_type or hc_type not in ALLOWED_HEALTH_CHECK_TYPES:
+    if not hc_type or hc_type not in SUPPORTED_CHECK_TYPES:
         raise ScenarioValidationError(
-            f"Invalid health check type '{hc_type}'. Allowed types: {sorted(ALLOWED_HEALTH_CHECK_TYPES)}"
+            f"Invalid health check type '{hc_type}'. Allowed types: {sorted(SUPPORTED_CHECK_TYPES)}"
+        )
+
+    hc_version = hc_raw.get("version", "1.0.0")
+    if hc_version not in SUPPORTED_CHECK_VERSIONS:
+        raise ScenarioValidationError(
+            f"Unsupported health check version '{hc_version}'. Supported versions: {sorted(SUPPORTED_CHECK_VERSIONS)}"
         )
 
     hc_params = hc_raw.get("parameters")
     if not isinstance(hc_params, dict):
         raise ScenarioValidationError("Health check must specify a dictionary of 'parameters'.")
 
-    # Validate health check parameters
+    # Validate specific health check parameters
     if hc_type == "key_value_match":
         if "key" not in hc_params or not isinstance(hc_params["key"], str):
             raise ScenarioValidationError("health_check 'key_value_match' requires string 'key'.")
@@ -254,15 +273,46 @@ def validate_and_parse_scenario(data: dict[str, Any], raw_json: str = "") -> Dec
                 )
             if cond["op"] not in ("eq", "neq", "in", "nin"):
                 raise ScenarioValidationError(f"Unsupported condition operator '{cond['op']}'.")
+    elif hc_type == "registered_process":
+        if "executable_id" not in hc_params or not isinstance(hc_params["executable_id"], str):
+            raise ScenarioValidationError("health_check 'registered_process' requires string 'executable_id'.")
+        if "args" in hc_params:
+            if not isinstance(hc_params["args"], list) or not all(isinstance(a, str) for a in hc_params["args"]):
+                raise ScenarioValidationError("health_check 'registered_process' 'args' must be a list of strings.")
+    elif hc_type == "loopback_http":
+        url = hc_params.get("url")
+        if not url or not isinstance(url, str):
+            raise ScenarioValidationError("health_check 'loopback_http' requires string 'url'.")
+        parsed_url = urllib.parse.urlparse(url)
+        if parsed_url.scheme.lower() not in ("http", "https"):
+            raise ScenarioValidationError("health_check 'loopback_http' requires http or https scheme.")
+        host = (parsed_url.hostname or "").lower()
+        if host not in LOOPBACK_HOSTS:
+            raise ScenarioValidationError(
+                f"health_check 'loopback_http' url must target a loopback host (localhost, 127.0.0.1, [::1]). Got '{host}'."
+            )
 
     timeout_ms = hc_raw.get("timeout_ms", 5000)
-    if not isinstance(timeout_ms, int) or timeout_ms <= 0:
-        raise ScenarioValidationError("'timeout_ms' must be a positive integer.")
+    if not isinstance(timeout_ms, int) or timeout_ms < 100 or timeout_ms > 60000:
+        raise ScenarioValidationError("'timeout_ms' must be an integer between 100 and 60000.")
+
+    repeat_count = hc_raw.get("repeat_count", 1)
+    if not isinstance(repeat_count, int) or repeat_count < 1 or repeat_count > 10:
+        raise ScenarioValidationError("'repeat_count' must be an integer between 1 and 10.")
+
+    required_consistency = hc_raw.get("required_consistency", "ALL_MATCH")
+    if required_consistency not in ("ALL_MATCH",):
+        raise ScenarioValidationError("Currently supported required_consistency is 'ALL_MATCH'.")
 
     health_check = ScenarioHealthCheck(
         type=hc_type,
+        version=hc_version,
+        name=hc_raw.get("name", hc_type),
+        description=hc_raw.get("description", ""),
         parameters=hc_params,
         timeout_ms=timeout_ms,
+        repeat_count=repeat_count,
+        required_consistency=required_consistency,
     )
 
     expected_outcome = data.get("expected_outcome")
@@ -288,65 +338,41 @@ def validate_and_parse_scenario(data: dict[str, Any], raw_json: str = "") -> Dec
     )
 
 
-def build_declarative_health_check(hc_def: ScenarioHealthCheck) -> Any:
-    """Build a deterministic HealthCheckFn from a validated ScenarioHealthCheck."""
-    from .models import HealthCheckOutcome, HealthCheckResult
-    from .simulation import SimulatedWorkspace
+def build_declarative_health_check(hc_def: ScenarioHealthCheck) -> BaseHealthCheck:
+    """Build a pluggable, versioned BaseHealthCheck from validated ScenarioHealthCheck."""
+    return create_health_check(
+        check_type=hc_def.type,
+        check_version=hc_def.version,
+        name=hc_def.name,
+        description=hc_def.description,
+        timeout_ms=hc_def.timeout_ms,
+        repeat_count=hc_def.repeat_count,
+        required_consistency=hc_def.required_consistency,
+        parameters=hc_def.parameters,
+    )
 
-    def health_check(ws: SimulatedWorkspace) -> HealthCheckResult:
-        state = ws.current_state
 
-        if hc_def.type == "key_value_match":
-            key = hc_def.parameters["key"]
-            expected = hc_def.parameters["expected_value"]
-            actual = state.get(key)
-            if actual == expected:
-                return HealthCheckResult(
-                    HealthCheckOutcome.FAIL,
-                    f"Failure condition matched: key '{key}' has value {actual!r}",
-                )
-            return HealthCheckResult(
-                HealthCheckOutcome.PASS,
-                f"Health check passed: key '{key}' does not match failure value",
-            )
+def load_scenario_file(file_path: str | Path) -> DeclarativeScenario:
+    """Safely load and validate a declarative scenario file from disk.
 
-        elif hc_def.type == "compound_condition":
-            conditions = hc_def.parameters.get("conditions", [])
-            matches = []
-            for cond in conditions:
-                key = cond["key"]
-                op = cond["op"]
-                target_val = cond.get("value")
-                actual_val = state.get(key)
+    Only standard JSON parsing is used. No code execution, imports, or eval.
+    """
+    path = Path(file_path).resolve()
+    _validate_safe_path(str(file_path))
 
-                matched = False
-                if op == "eq":
-                    matched = actual_val == target_val
-                elif op == "neq":
-                    matched = actual_val != target_val
-                elif op == "in":
-                    matched = isinstance(target_val, (list, tuple, set)) and actual_val in target_val
-                elif op == "nin":
-                    matched = isinstance(target_val, (list, tuple, set)) and actual_val not in target_val
+    if not path.is_file():
+        raise FileNotFoundError(f"Scenario file not found: {path}")
 
-                if matched:
-                    matches.append(f"{key} {op} {target_val!r}")
-                else:
-                    break
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+        parsed_json = json.loads(raw_text)
+    except json.JSONDecodeError as err:
+        raise ScenarioValidationError(f"Invalid JSON syntax in {path.name}: {err}") from err
 
-            if len(matches) == len(conditions) and len(conditions) > 0:
-                return HealthCheckResult(
-                    HealthCheckOutcome.FAIL,
-                    f"Compound failure condition met: {', '.join(matches)}",
-                )
-            return HealthCheckResult(
-                HealthCheckOutcome.PASS,
-                "Health check passed: compound failure condition not satisfied",
-            )
+    if not isinstance(parsed_json, dict):
+        raise ScenarioValidationError("Top-level scenario JSON must be an object.")
 
-        return HealthCheckResult(HealthCheckOutcome.INCONCLUSIVE, f"Unknown check type '{hc_def.type}'")
-
-    return health_check
+    return validate_and_parse_scenario(parsed_json, raw_json=raw_text)
 
 
 def execute_scenario(
@@ -389,7 +415,13 @@ def execute_scenario(
         inv_id,
         "RUN_STARTED",
         f"Execution started for scenario '{scenario.id}'",
-        details={"name": scenario.name, "hash": scenario.content_hash},
+        details={
+            "name": scenario.name,
+            "hash": scenario.content_hash,
+            "check_type": scenario.health_check.type,
+            "check_version": scenario.health_check.version,
+            "repeat_count": scenario.health_check.repeat_count,
+        },
     )
 
     token = cancellation_token or CancellationToken()
@@ -413,8 +445,8 @@ def execute_scenario(
 
     workspace = SimulatedWorkspace(baseline_state=scenario.baseline_state)
     runner = ExperimentRunner(workspace, storage, inv_id, cancellation_token=token)
-    hc_fn = build_declarative_health_check(scenario.health_check)
-    debugger = DeltaDebugger(runner, changes, hc_fn)
+    hc_instance = build_declarative_health_check(scenario.health_check)
+    debugger = DeltaDebugger(runner, changes, hc_instance)
 
     result = debugger.minimize([c.id for c in changes])
 
@@ -445,26 +477,3 @@ def execute_scenario(
     )
 
     return inv, result
-
-
-def load_scenario_file(file_path: str | Path) -> DeclarativeScenario:
-    """Safely load and validate a declarative scenario file from disk.
-
-    Only standard JSON parsing is used. No code execution, imports, or eval.
-    """
-    path = Path(file_path).resolve()
-    _validate_safe_path(str(file_path))
-
-    if not path.is_file():
-        raise FileNotFoundError(f"Scenario file not found: {path}")
-
-    try:
-        raw_text = path.read_text(encoding="utf-8")
-        parsed_json = json.loads(raw_text)
-    except json.JSONDecodeError as err:
-        raise ScenarioValidationError(f"Invalid JSON syntax in {path.name}: {err}") from err
-
-    if not isinstance(parsed_json, dict):
-        raise ScenarioValidationError("Top-level scenario JSON must be an object.")
-
-    return validate_and_parse_scenario(parsed_json, raw_json=raw_text)

@@ -1,15 +1,17 @@
-"""Experiment runner for orchestrating safe, repeatable trials with cancellation support."""
+"""Experiment runner for orchestrating safe, repeatable trials with cancellation and evidence tracking."""
 
 from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
+from .health_checks.base import BaseHealthCheck
 from .models import (
     CancellationToken,
     Change,
     ExperimentTrial,
+    HealthCheckAttempt,
     HealthCheckOutcome,
     HealthCheckResult,
     utc_now_iso,
@@ -24,7 +26,7 @@ from .storage import Storage
 
 
 class ExperimentRunner:
-    """Orchestrates individual experiment trials with baseline reset and cleanup."""
+    """Orchestrates individual experiment trials with baseline reset, cleanup, and evidence recording."""
 
     def __init__(
         self,
@@ -41,17 +43,17 @@ class ExperimentRunner:
     def run_trial(
         self,
         selected_changes: list[Change],
-        health_check: HealthCheckFn,
+        health_check: BaseHealthCheck | HealthCheckFn,
         notes: str = "",
     ) -> ExperimentTrial:
-        """Execute a single trial with safety cleanup.
+        """Execute a single trial with safety cleanup and evidence capture.
 
         Steps:
             1. Check cancellation token.
             2. Reset to baseline & verify.
             3. Apply selected changes in dependency-safe order.
             4. Execute repeatable health check.
-            5. Record output, duration, and outcome.
+            5. Record output, duration, outcome, and evidence attempts.
             6. Reset to baseline in finally block.
             7. Store trial in SQLite and record audit log.
         """
@@ -64,6 +66,16 @@ class ExperimentRunner:
         health_output = ""
         reset_status = "UNKNOWN"
         trial_notes = notes
+        attempts: list[HealthCheckAttempt] = []
+
+        if isinstance(health_check, BaseHealthCheck):
+            check_type = health_check.check_type
+            check_version = health_check.check_version
+            parameters_hash = health_check.parameters_hash
+        else:
+            check_type = getattr(health_check, "check_type", "custom_function")
+            check_version = getattr(health_check, "check_version", "1.0.0")
+            parameters_hash = getattr(health_check, "parameters_hash", "")
 
         # 1. Check if cancellation requested before launching trial
         if self.cancellation_token.is_cancelled:
@@ -85,6 +97,10 @@ class ExperimentRunner:
                 reset_status="SUCCESS",
                 duration_ms=0.0,
                 notes=trial_notes,
+                check_type=check_type,
+                check_version=check_version,
+                parameters_hash=parameters_hash,
+                attempts=[],
             )
             self.storage.save_trial(trial)
             return trial
@@ -97,9 +113,26 @@ class ExperimentRunner:
             applied_ids = self.workspace.apply_changes(selected_changes)
 
             # 4. Execute health check
-            hc_result: HealthCheckResult = health_check(self.workspace)
+            if isinstance(health_check, BaseHealthCheck):
+                hc_result = health_check.run(self.workspace)
+            else:
+                hc_result = health_check(self.workspace)
+
             outcome = hc_result.outcome
             health_output = hc_result.output
+            if hasattr(hc_result, "attempts") and hc_result.attempts:
+                attempts = list(hc_result.attempts)
+            else:
+                attempts = [
+                    HealthCheckAttempt(
+                        attempt_number=1,
+                        outcome=outcome,
+                        start_time=start_iso,
+                        finish_time=utc_now_iso(),
+                        duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                        bounded_evidence=health_output,
+                    )
+                ]
 
         except DependencyResolutionError as e:
             outcome = HealthCheckOutcome.INCONCLUSIVE
@@ -150,6 +183,10 @@ class ExperimentRunner:
             reset_status=reset_status,
             duration_ms=round(duration_ms, 2),
             notes=trial_notes,
+            check_type=check_type,
+            check_version=check_version,
+            parameters_hash=parameters_hash,
+            attempts=attempts,
         )
 
         self.storage.save_trial(trial)
@@ -162,6 +199,7 @@ class ExperimentRunner:
                 "changes": change_ids,
                 "duration_ms": trial.duration_ms,
                 "reset_status": reset_status,
+                "attempts_count": len(attempts),
             },
         )
         return trial

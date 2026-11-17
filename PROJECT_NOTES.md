@@ -3,7 +3,7 @@
 ## Phase 0: Repository Review & Product Skeleton
 - **Inspection Findings**:
   - Python 3.12.10 and Git 2.56 available on Windows.
-  - Zero third-party dependencies required. Standard library (`unittest`, `sqlite3`, `dataclasses`, `enum`, `json`, `argparse`, `hashlib`) is fully sufficient.
+  - Standard library (`unittest`, `sqlite3`, `dataclasses`, `enum`, `json`, `argparse`, `hashlib`, `urllib`) is fully sufficient.
 - **Completed**:
   - Authored `docs/spec.md` with mission, MVP boundary, demonstration scenarios, pass/fail rules, and roadmap.
   - Authored `docs/architecture.md` outlining modular components and isolation boundaries.
@@ -17,67 +17,55 @@
 
 ## Phase 2: Declarative Scenarios, CLI, and Auditability
 - **Completed**:
-  - `statebisect/scenarios.py`:
-    - Declarative scenario schema v1.0.0.
-    - Strict validation against forbidden executable properties (`command`, `powershell`, `script`, `eval`, `cmd`, etc.).
-    - Allowlisted operations (`set_key`, `replace_value`, `delete_key`, `append_list`).
-    - Allowlisted health-checks (`key_value_match`, `compound_condition`).
-    - Dependency validation and Kahn's topological sort cycle rejection.
-    - Safe path checking preventing directory traversal (`..`).
-    - SHA-256 cryptographic hashing of scenario definitions.
-    - Declarative-to-execution bridge (`execute_scenario`).
-  - `scenarios/`:
-    - `scenarios/single_cause.json`: 8 candidate changes, single root cause (`C4`).
-    - `scenarios/interaction.json`: 8 candidate changes, 2-change interaction (`C3` + `C6`).
-    - `scenarios/invalid_scenario.json`: Example demonstrating strict rejection of script/command properties.
-  - `statebisect/cli.py` & `statebisect_cli.py`:
-    - Full CLI with subcommands: `list-scenarios`, `validate-scenario`, `run-scenario`, `inspect-investigation`, `export-report`.
-    - Proper exit codes (0 for success, 1 for error, 130 for cancellation, 2 for CLI arg error).
-    - Signal handling for graceful user cancellation (SIGINT / Ctrl+C) ensuring baseline cleanup.
-    - Exporting reports to text and JSON formats (`--format text|json`).
-  - `statebisect/storage.py`:
-    - Versioned schema migrations (`schema_migrations` table tracking versions 1 and 2).
-    - Non-destructive migration of Phase 1 databases preserving existing investigations and trials.
-    - Idempotent / repeat-safe migrations.
-    - Structured audit trail table (`audit_logs`) tracking lifecycle events (`RUN_STARTED`, `TRIAL_COMPLETED`, `RUN_FINISHED`, `TRIAL_CANCELLED`, `CLEANUP_FAILURE`).
-    - Snapshot persistence of scenario definitions and SHA-256 hashes for complete reproducibility.
-  - `statebisect/reporting.py`:
-    - Added structured JSON report export (`generate_json_report`).
-    - Explicit explanation of 1-minimality vs. globally minimal set.
-  - `tests/`: Added 25 new tests across `test_scenarios.py`, `test_cli.py`, `test_migration.py`, and `test_cancellation.py`. Total test count: 40 tests.
+  - `statebisect/scenarios.py`: Declarative scenario schema v1.0.0, strict validation, safe path checks, SHA-256 hashing.
+  - `statebisect/cli.py`: CLI subcommands (`list-scenarios`, `validate-scenario`, `run-scenario`, `inspect-investigation`, `export-report`).
+  - `statebisect/storage.py`: Schema migrations up to Version 2 and structured audit logging (`audit_logs`).
+  - Graceful cancellation via `CancellationToken` (handling SIGINT / Ctrl+C).
+
+## Phase 3: Health Checks and Evidence Model
+- **Completed**:
+  - `statebisect/health_checks/`:
+    - `BaseHealthCheck`: Pluggable, versioned health check contract with parameter hashing, timeout handling, repeat execution, and consistency aggregation.
+    - `SimulatedStateCheck` (v1.0.0): In-memory state and compound condition checker with backward compatibility.
+    - `RegisteredProcessCheck` (v1.0.0): Opt-in test process execution restricted to explicitly registered executables (`ProcessRegistry`). Passes structured argument lists only (`list[str]`); `shell=True` and arbitrary command strings are strictly disallowed.
+    - `LoopbackHttpCheck` (v1.0.0): Read-only GET requests strictly restricted to loopback addresses (`127.0.0.1`, `localhost`, `[::1]`). Custom `SafeLoopbackRedirectHandler` prevents non-loopback redirect evasion.
+    - `sanitize_and_bound_evidence`: Scrubs sensitive tokens/passwords (`redact_sensitive_text`) and enforces 4096-character bounds (`bound_evidence`) on evidence text.
+  - Repetition and Flakiness:
+    - Configurable `repeat_count` (1 to 10) and `required_consistency` (`"ALL_MATCH"`).
+    - If attempts disagree across repeats, the trial outcome is marked `INCONCLUSIVE` (reasoning: intermittent / flaky symptom). Intermittent failures are never coerced to confident causes.
+  - Persistence & Migration:
+    - SQLite Schema Version 3: Adds `health_check_evidence` table recording each individual attempt with timestamps, exit codes, expected/observed values, and truncation/redaction indicators.
+    - Non-destructive migration from Version 1/2 to Version 3 preserving all past investigations and trial records.
+  - Reporting & CLI:
+    - `inspect-investigation` displays attempt counts and check types.
+    - `export-report` includes detailed evidence attempt arrays in JSON.
+  - `tests/`: Added `tests/test_health_checks.py`. Total test count: 52 tests, all passing.
 
 ## Technology & Algorithm Decisions & Source Verification
 
-1. **Algorithm: Delta Debugging (`ddmin`)**:
-   - **Primary Source**: Andreas Zeller and Ralf Hildebrandt, *"Simplifying and Isolating Failure-Inducing Input"*, IEEE Transactions on Software Engineering, Vol. 28, No. 2, Feb 2002.
-   - **Comparative Analysis**:
-     - *Zeller (2002)* establishes the formal definition of 1-minimality: a failure-inducing input $c$ is 1-minimal if for all $x \in c$, $test(c \setminus \{x\}) \neq \text{FAIL}$. Zeller proves that finding a globally minimal subset across all $2^N$ combinations is NP-complete, whereas `ddmin` produces a 1-minimal set in polynomial time ($O(|c|^2)$ worst-case, $O(|c| \log |c|)$ best-case).
-     - *GRIMM (`grimm-co/delta-debugging`)* implements file byte-reduction for fuzzing crashes in Python 3.
-     - *StateBisect Adaptation*: StateBisect applies Delta Debugging to structured configuration changes rather than raw character streams. We extended classical `ddmin` to enforce topological dependency order, gracefully handle explicit `INCONCLUSIVE` health checks without guessing, cache intermediate trials in SQLite, and support thread-safe cancellation between trials.
-2. **CLI Framework**:
-   - **Choice**: Python standard library `argparse`.
-   - **Tradeoff**: Avoided introducing external dependencies (such as Click or Typer) because `argparse` is built-in, stable, well-specified, and completely satisfies the required subcommands, options, and error handling.
-3. **Database Migrations**:
-   - **Choice**: Custom lightweight migration runner with `schema_migrations` tracking table in `storage.py`.
-   - **Tradeoff**: Avoided heavyweight external tools (like Alembic) which require SQLAlchemy dependencies. SQLite's transactional `ALTER TABLE` and table inspection provide zero-dependency, crash-safe, and idempotent migrations.
-4. **Data Format**:
-   - **Choice**: JSON (`json` module).
-   - **Tradeoff**: Pure data parsing only; eliminates the arbitrary code execution vulnerabilities associated with YAML (`yaml.load`) or Python code execution.
+1. **Pluggable Health Check Architecture**:
+   - **Primary Source**: System telemetry standards and Microsoft safe testing patterns.
+   - **Safety Boundary**: Scenario JSON definitions are untrusted data. Therefore, process health checks cannot accept arbitrary file paths or shell strings. They must reference a pre-registered executable ID verified outside the scenario. Subprocess spawning enforces `shell=False`.
+2. **Loopback HTTP Isolation**:
+   - **Primary Source**: RFC 6761 (Special-Use Domain Names) & RFC 1122 (Loopback host address requirements).
+   - **Safety Boundary**: HTTP checks are restricted strictly to loopback interfaces to prevent SSRF or unintended external network interactions during investigations. Redirects are monitored and blocked if they attempt to escape loopback.
+3. **Flaky / Intermittent Result Handling**:
+   - **Decision**: Strict consistency (`ALL_MATCH`).
+   - **Tradeoff**: In automated root-cause bisecting, an intermittent failure produces false candidate attribution if non-determinism is ignored. Any variance across repeated attempts is classified as `INCONCLUSIVE`.
 
 ## Verification Results
-- All 40 unit and integration tests passing (`python -m unittest discover -s tests -v`).
+- All 52 unit and integration tests passing (`python -m unittest discover -s tests -v`).
 - Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
-- Declarative CLI commands (`list-scenarios`, `validate-scenario`, `run-scenario`, `inspect-investigation`, `export-report`) manually verified and automated in integration tests.
+- CLI commands validated on multi-attempt scenario (`scenarios/repeated_health_check.json`).
 
 ## Known Limitations
-- StateBisect is currently a pure simulation environment; host Windows registry, files, and services are not touched.
-- Health checks are evaluated against simulated state conditions; live Windows process execution and HTTP probe checks will be introduced in Phase 3.
+- Process execution checks require manual registration in Python code (`ProcessRegistry.register_executable`) and explicit opt-in (`ProcessRegistry.enable()`).
+- Live system-wide Windows Event Log monitoring and registry snapshot comparison are not yet present (scheduled for Phase 4).
 
-## Next Phase: Phase 3 — Health Checks and Evidence Model
-- **Entry Criteria**: Phase 2 acceptance criteria met (declarative scenarios, schema validation, CLI, auditability, migrations, cancellation, 40 tests passing).
+## Next Phase: Phase 4 — Windows Read-Only Collector MVP
+- **Entry Criteria**: Phase 3 acceptance criteria met (pluggable versioned health checks, repeat consistency aggregation, evidence model, Schema Version 3 migrations, 52 tests passing).
 - **Upcoming Deliverables**:
-  - Pluggable health check interface (process exit codes, output pattern matching, local endpoint response).
-  - Strict allowlists for health-check commands (no arbitrary shell execution).
-  - Health-check timeouts and repeat policies.
-  - Distinguishing stable pass/fail from intermittent results.
-  - Evidence retention and linking.
+  - Read-only Windows collector (Event Logs, service status, installed updates, inventory snapshot).
+  - Explicit provenance and coverage tracking (missing sources reported as monitoring gaps).
+  - Export/import of collected change records into the core investigation engine.
+  - Zero host configuration modifications or elevation requirements.

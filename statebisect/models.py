@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-ENGINE_VERSION = "0.2.0"
+ENGINE_VERSION = "0.3.0"
 
 
 class HealthCheckOutcome(str, Enum):
@@ -48,12 +48,32 @@ class Change:
 
 
 @dataclass
+class HealthCheckAttempt:
+    """Record of an individual health check attempt within a repeatable trial."""
+
+    attempt_number: int
+    outcome: HealthCheckOutcome
+    start_time: str
+    finish_time: str
+    duration_ms: float
+    exit_code: int | None = None
+    expected_value: str = ""
+    observed_value: str = ""
+    bounded_evidence: str = ""
+    error_reason: str = ""
+    is_truncated: bool = False
+    is_redacted: bool = False
+
+
+@dataclass
 class HealthCheckResult:
-    """The result of executing a health check against a target environment."""
+    """The aggregate result of executing a health check against a target environment."""
 
     outcome: HealthCheckOutcome
     output: str
     duration_ms: float = 0.0
+    reason: str = ""
+    attempts: list[HealthCheckAttempt] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -71,6 +91,10 @@ class ExperimentTrial:
     reset_status: str
     duration_ms: float
     notes: str = ""
+    check_type: str = ""
+    check_version: str = "1.0.0"
+    parameters_hash: str = ""
+    attempts: list[HealthCheckAttempt] = field(default_factory=list)
 
 
 @dataclass

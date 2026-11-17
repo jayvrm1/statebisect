@@ -25,7 +25,7 @@ class TestDatabaseMigrations(unittest.TestCase):
     def test_fresh_schema_initialization(self):
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 2)
+            self.assertEqual(storage.get_current_schema_version(), 3)
 
             # Check that all tables exist
             cursor = storage._conn.execute(
@@ -36,6 +36,7 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertIn("experiment_trials", tables)
             self.assertIn("schema_migrations", tables)
             self.assertIn("audit_logs", tables)
+            self.assertIn("health_check_evidence", tables)
         finally:
             storage.close()
 
@@ -78,10 +79,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with StateBisect Phase 2 Storage
+        # 2. Open with StateBisect Phase 3 Storage
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 2)
+            self.assertEqual(storage.get_current_schema_version(), 3)
 
             # 3. Verify existing legacy data is preserved intact
             inv = storage.get_investigation("phase1-inv")
@@ -95,7 +96,7 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertEqual(trials[0].trial_id, "trial-legacy")
             self.assertEqual(trials[0].outcome, HealthCheckOutcome.FAIL)
 
-            # 4. Verify audit_logs table is ready and functional
+            # 4. Verify audit_logs and health_check_evidence are ready
             storage.log_audit("phase1-inv", "MIGRATION_VERIFIED", "Legacy records verified")
             logs = storage.get_audit_logs("phase1-inv")
             self.assertEqual(len(logs), 1)
@@ -106,10 +107,9 @@ class TestDatabaseMigrations(unittest.TestCase):
     def test_migrations_are_repeat_safe(self):
         storage = Storage(self.db_path)
         try:
-            # Re-applying migrations shouldn't raise any errors or duplicate rows
             storage._apply_migrations()
             storage._apply_migrations()
-            self.assertEqual(storage.get_current_schema_version(), 2)
+            self.assertEqual(storage.get_current_schema_version(), 3)
         finally:
             storage.close()
 

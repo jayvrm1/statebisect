@@ -12,13 +12,14 @@ from .models import (
     AuditLogEntry,
     ENGINE_VERSION,
     ExperimentTrial,
+    HealthCheckAttempt,
     HealthCheckOutcome,
     Investigation,
     InvestigationStatus,
     utc_now_iso,
 )
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 class Storage:
@@ -102,7 +103,6 @@ class Storage:
 
             # Migration 2: Auditability, scenario snapshots, and structured logs
             if current_ver < 2:
-                # Add columns to investigations if missing
                 cols_cursor = self._conn.execute("PRAGMA table_info(investigations)")
                 existing_cols = {row["name"] for row in cols_cursor.fetchall()}
 
@@ -115,7 +115,6 @@ class Storage:
                 if "engine_version" not in existing_cols:
                     self._conn.execute("ALTER TABLE investigations ADD COLUMN engine_version TEXT DEFAULT '0.2.0'")
 
-                # Create structured audit logs table
                 self._conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -135,6 +134,57 @@ class Storage:
                     VALUES (2, datetime('now'), 'Add scenario snapshots, reproducibility columns, and audit logs');
                     """
                 )
+                current_ver = 2
+
+            # Migration 3: Phase 3 Health Check Evidence model
+            if current_ver < 3:
+                # Add check metadata to experiment_trials if missing
+                trials_cursor = self._conn.execute("PRAGMA table_info(experiment_trials)")
+                existing_trial_cols = {row["name"] for row in trials_cursor.fetchall()}
+
+                if "check_type" not in existing_trial_cols:
+                    self._conn.execute("ALTER TABLE experiment_trials ADD COLUMN check_type TEXT DEFAULT ''")
+                if "check_version" not in existing_trial_cols:
+                    self._conn.execute("ALTER TABLE experiment_trials ADD COLUMN check_version TEXT DEFAULT '1.0.0'")
+                if "parameters_hash" not in existing_trial_cols:
+                    self._conn.execute("ALTER TABLE experiment_trials ADD COLUMN parameters_hash TEXT DEFAULT ''")
+
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS health_check_evidence (
+                        evidence_id TEXT PRIMARY KEY,
+                        trial_id TEXT NOT NULL,
+                        investigation_id TEXT NOT NULL,
+                        check_type TEXT NOT NULL,
+                        check_version TEXT NOT NULL,
+                        parameters_hash TEXT NOT NULL,
+                        attempt_number INTEGER NOT NULL,
+                        outcome TEXT NOT NULL,
+                        exit_code INTEGER,
+                        duration_ms REAL NOT NULL,
+                        expected_value TEXT,
+                        observed_value TEXT,
+                        bounded_evidence TEXT,
+                        error_reason TEXT,
+                        is_truncated INTEGER NOT NULL,
+                        is_redacted INTEGER NOT NULL,
+                        start_time TEXT NOT NULL,
+                        finish_time TEXT NOT NULL,
+                        FOREIGN KEY (trial_id) REFERENCES experiment_trials(trial_id),
+                        FOREIGN KEY (investigation_id) REFERENCES investigations(id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_evidence_trial 
+                    ON health_check_evidence(trial_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_evidence_investigation 
+                    ON health_check_evidence(investigation_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (3, datetime('now'), 'Add detailed health check evidence attempts tracking');
+                    """
+                )
+                current_ver = 3
 
     def log_audit(
         self,
@@ -257,20 +307,91 @@ class Storage:
             for row in cursor.fetchall()
         ]
 
+    def save_evidence_attempt(
+        self,
+        attempt: HealthCheckAttempt,
+        trial_id: str,
+        investigation_id: str,
+        check_type: str,
+        check_version: str,
+        parameters_hash: str,
+    ) -> None:
+        """Persist a single health check attempt record."""
+        evidence_id = f"ev-{uuid.uuid4().hex[:12]}"
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO health_check_evidence (
+                    evidence_id, trial_id, investigation_id, check_type, check_version,
+                    parameters_hash, attempt_number, outcome, exit_code, duration_ms,
+                    expected_value, observed_value, bounded_evidence, error_reason,
+                    is_truncated, is_redacted, start_time, finish_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence_id,
+                    trial_id,
+                    investigation_id,
+                    check_type,
+                    check_version,
+                    parameters_hash,
+                    attempt.attempt_number,
+                    attempt.outcome.value,
+                    attempt.exit_code,
+                    attempt.duration_ms,
+                    attempt.expected_value,
+                    attempt.observed_value,
+                    attempt.bounded_evidence,
+                    attempt.error_reason,
+                    1 if attempt.is_truncated else 0,
+                    1 if attempt.is_redacted else 0,
+                    attempt.start_time,
+                    attempt.finish_time,
+                ),
+            )
+
+    def get_evidence_for_trial(self, trial_id: str) -> list[HealthCheckAttempt]:
+        """Fetch all evidence attempts recorded for a trial."""
+        cursor = self._conn.execute(
+            "SELECT * FROM health_check_evidence WHERE trial_id = ? ORDER BY attempt_number ASC",
+            (trial_id,),
+        )
+        return [
+            HealthCheckAttempt(
+                attempt_number=r["attempt_number"],
+                outcome=HealthCheckOutcome(r["outcome"]),
+                start_time=r["start_time"],
+                finish_time=r["finish_time"],
+                duration_ms=r["duration_ms"],
+                exit_code=r["exit_code"],
+                expected_value=r["expected_value"] or "",
+                observed_value=r["observed_value"] or "",
+                bounded_evidence=r["bounded_evidence"] or "",
+                error_reason=r["error_reason"] or "",
+                is_truncated=bool(r["is_truncated"]),
+                is_redacted=bool(r["is_redacted"]),
+            )
+            for r in cursor.fetchall()
+        ]
+
     def save_trial(self, trial: ExperimentTrial) -> None:
         with self._conn:
             self._conn.execute(
                 """
                 INSERT INTO experiment_trials (
                     trial_id, investigation_id, selected_change_ids, start_time,
-                    finish_time, outcome, health_output, reset_status, duration_ms, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    finish_time, outcome, health_output, reset_status, duration_ms, notes,
+                    check_type, check_version, parameters_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(trial_id) DO UPDATE SET
                     outcome=excluded.outcome,
                     health_output=excluded.health_output,
                     reset_status=excluded.reset_status,
                     duration_ms=excluded.duration_ms,
-                    notes=excluded.notes
+                    notes=excluded.notes,
+                    check_type=excluded.check_type,
+                    check_version=excluded.check_version,
+                    parameters_hash=excluded.parameters_hash
                 """,
                 (
                     trial.trial_id,
@@ -283,7 +404,21 @@ class Storage:
                     trial.reset_status,
                     trial.duration_ms,
                     trial.notes,
+                    trial.check_type,
+                    trial.check_version,
+                    trial.parameters_hash,
                 ),
+            )
+
+        # Save any associated individual attempt records
+        for att in trial.attempts:
+            self.save_evidence_attempt(
+                attempt=att,
+                trial_id=trial.trial_id,
+                investigation_id=trial.investigation_id,
+                check_type=trial.check_type,
+                check_version=trial.check_version,
+                parameters_hash=trial.parameters_hash,
             )
 
     def get_trials(self, investigation_id: str) -> list[ExperimentTrial]:
@@ -292,18 +427,26 @@ class Storage:
             (investigation_id,),
         )
         rows = cursor.fetchall()
-        return [
-            ExperimentTrial(
-                trial_id=r["trial_id"],
-                investigation_id=r["investigation_id"],
-                selected_change_ids=json.loads(r["selected_change_ids"]),
-                start_time=r["start_time"],
-                finish_time=r["finish_time"],
-                outcome=HealthCheckOutcome(r["outcome"]),
-                health_output=r["health_output"],
-                reset_status=r["reset_status"],
-                duration_ms=r["duration_ms"],
-                notes=r["notes"] or "",
+        trials = []
+        for r in rows:
+            trial_id = r["trial_id"]
+            attempts = self.get_evidence_for_trial(trial_id)
+            trials.append(
+                ExperimentTrial(
+                    trial_id=trial_id,
+                    investigation_id=r["investigation_id"],
+                    selected_change_ids=json.loads(r["selected_change_ids"]),
+                    start_time=r["start_time"],
+                    finish_time=r["finish_time"],
+                    outcome=HealthCheckOutcome(r["outcome"]),
+                    health_output=r["health_output"],
+                    reset_status=r["reset_status"],
+                    duration_ms=r["duration_ms"],
+                    notes=r["notes"] or "",
+                    check_type=r["check_type"] or "",
+                    check_version=r["check_version"] or "1.0.0",
+                    parameters_hash=r["parameters_hash"] or "",
+                    attempts=attempts,
+                )
             )
-            for r in rows
-        ]
+        return trials
