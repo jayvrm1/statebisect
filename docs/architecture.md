@@ -49,3 +49,4 @@
    - Disposable VM Adapter (Hyper-V snapshot restoration).
    - Local API & Web Dashboard.
    - Evidence-grounded AI explanation assistant.
+

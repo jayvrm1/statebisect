@@ -37,3 +37,4 @@
   - Schema validation, timeouts, and operation allowlists.
   - CLI commands: `list-scenarios`, `run-scenario`, `inspect-investigation`, `export-report`.
   - SQLite schema versioning and migrations.
+

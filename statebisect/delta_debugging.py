@@ -208,3 +208,4 @@ class DeltaDebugger:
             rationale=rationale,
             trials=list(self.trial_cache.values()),
         )
+

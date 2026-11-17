@@ -43,3 +43,4 @@ def generate_text_report(investigation: Investigation, result: MinimizationResul
     lines.append("================================================================================")
 
     return "\n".join(lines)
+

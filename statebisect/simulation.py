@@ -113,3 +113,4 @@ def create_key_value_health_check(
         return HealthCheckResult(outcome=outcome, output=message)
 
     return check
+

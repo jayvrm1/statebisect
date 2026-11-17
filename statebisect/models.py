@@ -95,3 +95,4 @@ class MinimizationResult:
     verdict: str
     rationale: str
     trials: list[ExperimentTrial] = field(default_factory=list)
+

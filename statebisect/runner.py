@@ -111,3 +111,4 @@ class ExperimentRunner:
 
         self.storage.save_trial(trial)
         return trial
+
