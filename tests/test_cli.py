@@ -233,6 +233,141 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(parsed["session_id"], sess_id)
         self.assertEqual(parsed["status"], "COMPLETED")
 
+    def test_cli_phase6_investigation_and_candidates_workflow(self):
+        from statebisect.storage import Storage
+        from statebisect.collector.models import SnapshotDiff, DiffChangeType
+
+        # 1. Create investigation via CLI
+        code, out, _ = self.run_cli([
+            "create-investigation",
+            "--symptom", "Web service 503 error",
+            "--target", "WebServer",
+            "--onset", "2026-03-30 12:00:00",
+            "--timezone", "UTC",
+            "--notes", "Production failure test",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("INVESTIGATION CREATED", out)
+
+        # Retrieve investigation ID
+        storage = Storage(self.db_path)
+        invs = storage.list_investigations()
+        self.assertEqual(len(invs), 1)
+        inv_id = invs[0].id
+
+        # 2. Seed snapshot collection runs and a diff in storage for this test
+        from statebisect.collector.models import CollectionRun
+
+        run_a = CollectionRun(
+            run_id="run-a",
+            created_at="2026-03-30T11:00:00Z",
+            finished_at="2026-03-30T11:00:05Z",
+            collector_version="1.0.0",
+            os_platform="Windows-11",
+            machine_id="mach-1",
+            status="SUCCESS",
+            duration_ms=5000.0,
+            records=[],
+        )
+        run_b = CollectionRun(
+            run_id="run-b",
+            created_at="2026-03-30T12:00:00Z",
+            finished_at="2026-03-30T12:00:05Z",
+            collector_version="1.0.0",
+            os_platform="Windows-11",
+            machine_id="mach-1",
+            status="SUCCESS",
+            duration_ms=5000.0,
+            records=[],
+        )
+        storage.save_collection_run(run_a)
+        storage.save_collection_run(run_b)
+
+        diff = SnapshotDiff(
+            diff_id="diff-cli-1",
+            before_run_id="run-a",
+            after_run_id="run-b",
+            category="registry",
+            object_key="HKLM\\Software\\WebServer\\Port",
+            change_type=DiffChangeType.MODIFIED,
+            before_data=8080,
+            after_data=80,
+            notes="Port changed",
+        )
+        storage.save_snapshot_diffs([diff])
+        storage.close()
+
+        # 3. Generate candidates
+        code, out, _ = self.run_cli([
+            "generate-candidates",
+            inv_id,
+            "--before-run", "run-a",
+            "--after-run", "run-b",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn(f"CANDIDATE CHANGES GENERATED FOR: {inv_id}", out)
+        self.assertIn("cand-diff-diff-cli-1", out)
+        self.assertIn("Caution: Candidate scores indicate correlation", out)
+
+        # 4. List candidates (text and json)
+        code, out, _ = self.run_cli(["list-candidates", inv_id, "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn("cand-diff-diff-cli-1", out)
+        self.assertIn("ACTIVE", out)
+
+        code, out, _ = self.run_cli(["list-candidates", inv_id, "--format", "json", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        parsed_cands = json.loads(out)
+        self.assertEqual(len(parsed_cands), 1)
+        cand_id = parsed_cands[0]["candidate_id"]
+
+        # 5. Inspect candidate
+        code, out, _ = self.run_cli(["inspect-candidate", cand_id, "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn(f"CANDIDATE CHANGE INSPECTION: {cand_id}", out)
+        self.assertIn("SCORE BREAKDOWN (DETERMINISTIC):", out)
+
+        code, out, _ = self.run_cli(["inspect-candidate", cand_id, "--format", "json", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        cand_detail = json.loads(out)
+        self.assertEqual(cand_detail["candidate_id"], cand_id)
+        self.assertIn("score_breakdown", cand_detail)
+
+        # 6. Review candidate: Exclude with audited reason
+        code, out, _ = self.run_cli([
+            "review-candidate",
+            cand_id,
+            "--exclude",
+            "--reason", "Background configuration update unrelated to web server port",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn(f"CANDIDATE REVIEW RECORDED: {cand_id}", out)
+        self.assertIn("New Status      : EXCLUDED (Active: False)", out)
+
+        # Check active-only list is now empty
+        code, out, _ = self.run_cli(["list-candidates", inv_id, "--active-only", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn("No candidates found", out)
+
+        # Check full list still includes candidate marked EXCLUDED
+        code, out, _ = self.run_cli(["list-candidates", inv_id, "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn("EXCLUDED", out)
+
+        # 7. Review candidate: Re-include with reason
+        code, out, _ = self.run_cli([
+            "review-candidate",
+            cand_id,
+            "--include",
+            "--reason", "Further review suggests port change could cause bind failure",
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("New Status      : INCLUDED (Active: True)", out)
+
 
 if __name__ == "__main__":
     unittest.main()

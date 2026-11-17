@@ -113,6 +113,13 @@ class Investigation:
     scenario_hash: str = ""
     scenario_snapshot: str = ""
     engine_version: str = ENGINE_VERSION
+    onset_time_utc: str | None = None
+    onset_time_user: str | None = None
+    onset_timezone: str = "UTC"
+    last_known_good_utc: str | None = None
+    correlation_window_json: str = "{}"
+    ranking_version: str = "1.0.0"
+    user_notes: str = ""
 
 
 @dataclass

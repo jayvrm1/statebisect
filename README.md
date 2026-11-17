@@ -1,7 +1,7 @@
 # StateBisect
 
-> **Notice: Read-Only Windows Collector & Controlled Simulation Environment**  
-> StateBisect is currently in a Phase 4 state. It features a strictly read-only Windows Collector MVP and isolated simulation/health-check execution. **No modifications are made to the host Windows registry, files, services, or system configuration.** All host telemetry collection executes with standard-user privileges.
+> **Notice: Read-Only Windows Collector, Targeted Monitoring & Candidate Correlation**  
+> StateBisect is currently in a Phase 6 state. It features a read-only Windows Collector MVP, opt-in targeted change monitoring, and a deterministic candidate change generation and correlation engine. **No modifications are made to the host Windows registry, files, services, or system configuration.** All host telemetry collection executes with standard-user privileges. Candidate ranking establishes temporal and structural correlation for isolated delta-debugging experiments and is never represented as causal proof.
 
 ## 1. Product Mission
 
@@ -48,6 +48,19 @@ statebisect/
 │   │       ├── drivers.py   # Read-only kernel/filesystem driver inventory
 │   │       ├── network.py   # Read-only active network adapter configuration
 │   │       └── event_logs.py# Time-bounded Application/System event query via wevtutil
+│   ├── monitor/             # Targeted change monitoring (Phase 5)
+│   │   ├── base.py          # BaseMonitorSource abstract class & loss tracking
+│   │   ├── engine.py        # MonitoringEngine & foreground session lifecycle
+│   │   ├── models.py        # MonitoringSession, MonitoringEvent, MonitoringCoverageGap
+│   │   └── sources/         # 4 Targeted monitoring sources
+│   │       ├── event_log.py # Polling of Application and System channels
+│   │       ├── registry_watcher.py # Allowlisted user registry observer
+│   │       ├── sysmon.py    # Pre-installed Sysmon detection & query
+│   │       └── etw_evaluator.py # Safe ETW evaluation & documented deferral
+│   ├── correlation/         # Candidate change generation & correlation (Phase 6)
+│   │   ├── models.py        # CandidateChange, CorrelationWindow, ScoreBreakdown, ReviewRecord
+│   │   ├── ranker.py        # Deterministic, explainable candidate scoring and ranking
+│   │   └── engine.py        # Bounded correlation window & multi-source corroboration
 │   ├── health_checks/       # Pluggable, versioned health-check system
 │   │   ├── base.py          # BaseHealthCheck, evidence bounding, and secret redaction
 │   │   ├── simulated_state.py # State condition matcher (key-value and compound)
@@ -61,11 +74,13 @@ statebisect/
 │   ├── storage.py           # SQLite persistence layer with schema migrations & evidence store
 │   └── reporting.py         # Diagnostic text and JSON report generators
 ├── tests/
+│   ├── test_correlation.py  # Phase 6 candidate generation, ranking, and audit tests
+│   ├── test_monitor.py      # Phase 5 monitoring engine, sources, and lifecycle tests
 │   ├── test_collector.py    # Phase 4 collector, sources, diffing, and gap tests
 │   ├── test_health_checks.py# Phase 3 health check, evidence, and safety tests
 │   ├── test_scenarios.py    # Scenario schema validation and safety tests
 │   ├── test_cli.py          # CLI commands, formats, exit codes, and path tests
-│   ├── test_migration.py    # Schema migrations (v1->v2->v3->v4) and audit logging tests
+│   ├── test_migration.py    # Schema migrations (v1->v2->v3->v4->v5->v6) and audit logging tests
 │   ├── test_cancellation.py # Interruption, cleanup, and corruption handling tests
 │   ├── test_simulation.py   # Workspace, baseline, and dependency tests
 │   ├── test_storage.py      # SQLite storage and query tests
@@ -161,18 +176,60 @@ StateBisect provides opt-in, temporary, foreground-only monitoring of system con
 ### Snapshot Correlation:
 - When `--with-snapshots` is specified, StateBisect automatically runs a Phase 4 read-only snapshot before monitoring starts (`pre_snapshot_run_id`) and immediately after monitoring ends (`post_snapshot_run_id`), linking the session to configuration diffs.
 
-## 7. Persistence, Evidence Model & Migrations
+## 7. Candidate Change Generation & Correlation Engine (Phase 6)
+
+StateBisect bridges observed Windows telemetry with experiment execution by extracting grounded candidate changes and ranking them using transparent, evidence-based signals.
+
+### Core Principles:
+- **Grounded in Observations**: Candidates are derived strictly from observed snapshot differences (`compare_snapshots`) and monitoring events. The system **never** synthesizes hypothetical or unobserved changes.
+- **Correlation is Not Causation**: Candidate scores reflect temporal proximity, evidence strength, target relevance, and corroboration. Ranking determines the initial priority order for Delta Debugging experimentation—it is **never** presented as proof or probability of fault.
+- **Deterministic & Explainable**: Ranking uses fully explainable score breakdowns with zero machine learning or opaque heuristics. Tie-breaking is deterministic (Score -> Proximity -> Weight -> Candidate ID).
+- **Explicit User Review Audit**: Users can inspect, include (`--include`), or exclude (`--exclude`) candidates with mandatory audit justifications (`--reason`). Excluded candidates are disabled from downstream delta-debugging experiments (`is_active = False`) and tracked in the database.
+
+### Transparent Scoring Breakdown (0 to 100 points):
+1. **Evidence Type Strength (0 - 30 pts)**:
+   - Confirmed snapshot difference: +30 pts
+   - Direct system registry / service change: +25 pts
+   - Event log observation: +18 pts
+   - Application telemetry: +12 pts
+2. **Temporal Proximity to Onset (0 - 30 pts)**:
+   - Within 60 seconds before onset: +30 pts
+   - Within 5 minutes before onset: +25 pts
+   - Within 15 minutes before onset: +18 pts
+   - Within 1 hour before onset: +10 pts
+   - Beyond 1 hour or untimed fallback: +5 pts
+   - *Post-onset changes*: Receive 5 pts and are flagged in the scoring rationale as potential consequences/symptoms of the failure rather than causes.
+3. **Target Relevance (0 - 20 pts)**:
+   - Direct string match to target application/system name: +20 pts
+   - Known system infrastructure/dependency category (services, network, drivers): +10 pts
+   - Generic/unrelated components: +0 pts
+4. **Process Attribution Provenance (0 - 10 pts)**:
+   - `EVENT_PAYLOAD` with recorded PID and process name: +10 pts
+   - `PROCESS_LOOKUP` (table match at event time): +6 pts
+   - `UNAVAILABLE`: +2 pts
+5. **Multi-Source Corroboration (0 - 10 pts)**:
+   - Change observed across multiple independent sources (e.g. registry watcher event + snapshot diff): +10 pts bonus.
+6. **Coverage Gap Penalty (0 to -10 pts)**:
+   - If telemetry sources in that category reported permission denials or loss, a -10 pt penalty is applied with explicit notation of uncertainty.
+
+### Bounded Correlation Window:
+- Pre-onset lookback (default: 3600s) and post-onset bounds (default: 300s).
+- Robust timezone parsing (ISO, UTC, local offset).
+- **Untimed Fallback**: If symptom onset time is unknown or omitted, the engine falls back to evidence strength and target relevance without failing.
+
+## 8. Persistence, Evidence Model & Migrations
 
 - Default database: `data/statebisect.db`.
 - **Schema Migrations**:
-  - Automatically manages migrations up to Version 5 in `schema_migrations`.
-  - Non-destructive and idempotent: preserves all existing investigations, trials, snapshots, and diffs.
+  - Automatically manages migrations up to Version 6 in `schema_migrations`.
+  - Non-destructive and idempotent: preserves all existing investigations, trials, snapshots, monitoring sessions, and candidates.
   - Tables:
     - `investigations`, `experiment_trials`, `audit_logs`, `health_check_evidence` (Phases 1–3).
     - `collection_runs`, `snapshot_records`, `coverage_gaps`, `snapshot_diffs` (Phase 4).
     - `monitoring_sessions`, `monitoring_events`, `monitoring_coverage_gaps` (Phase 5).
+    - `investigation_candidates`, `candidate_reviews` (Phase 6).
 
-## 8. Command-Line Interface (CLI)
+## 9. Command-Line Interface (CLI)
 
 ```powershell
 # --- Investigation & Simulation Commands ---
@@ -205,11 +262,31 @@ python statebisect_cli.py list-monitor-sessions
 # Inspect monitoring session timeline and process attribution
 python statebisect_cli.py inspect-monitor-session <session_id>
 python statebisect_cli.py inspect-monitor-session <session_id> --format json
+
+# --- Candidate Generation & Review Commands (Phase 6) ---
+# 1. Create a new investigation record
+python statebisect_cli.py create-investigation --symptom "Database connection timeout" --target "PostgresApp" --onset "2026-03-30 14:00:00"
+
+# 2. Correlate snapshot diffs and monitoring events to generate ranked candidates
+python statebisect_cli.py generate-candidates <inv_id> --before-run <run_a> --after-run <run_b> --monitor-session <sess_id>
+
+# 3. List generated candidates
+python statebisect_cli.py list-candidates <inv_id>
+python statebisect_cli.py list-candidates <inv_id> --active-only
+python statebisect_cli.py list-candidates <inv_id> --format json
+
+# 4. Inspect detailed candidate score breakdown and provenance
+python statebisect_cli.py inspect-candidate <candidate_id>
+python statebisect_cli.py inspect-candidate <candidate_id> --format json
+
+# 5. Explicitly exclude or include a candidate with audited reason
+python statebisect_cli.py review-candidate <candidate_id> --exclude --reason "Verified routine antivirus definition update"
+python statebisect_cli.py review-candidate <candidate_id> --include --reason "Target config modified near onset"
 ```
 
-## 9. Running Tests and Demos
+## 10. Running Tests and Demos
 
-### Run Full Test Suite (85 Tests Across 11 Modules)
+### Run Full Test Suite (99 Tests Across 12 Modules)
 ```powershell
 python -m unittest discover -s tests -v
 ```
@@ -219,7 +296,7 @@ python -m unittest discover -s tests -v
 python demo_phase1.py
 ```
 
-## 10. Phase Status
+## 11. Phase Status
 
 - [x] **Phase 0 — Repository review & product skeleton**: Completed.
 - [x] **Phase 1 — Simulated experiment runner & Delta Debugging**: Completed.
@@ -227,4 +304,5 @@ python demo_phase1.py
 - [x] **Phase 3 — Failure health checks and evidence model**: Completed.
 - [x] **Phase 4 — Windows read-only collector MVP**: Completed.
 - [x] **Phase 5 — Targeted continuous collection & lightweight monitoring**: Completed.
-- [ ] **Phase 6 — Candidate change generation & correlation engine**: Next phase.
+- [x] **Phase 6 — Candidate change generation & correlation engine**: Completed.
+- [ ] **Phase 7 — Isolated trial runner & VM/Sandbox abstraction**: Next phase.

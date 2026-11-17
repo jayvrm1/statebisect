@@ -25,6 +25,14 @@ from .models import (
     InvestigationStatus,
     utc_now_iso,
 )
+from .correlation.models import (
+    CandidateChange,
+    CandidateEvidenceType,
+    CandidateReversibility,
+    CandidateReviewRecord,
+    CandidateReviewStatus,
+    ScoreBreakdown,
+)
 from .monitor.models import (
     EventConfidence,
     MonitoringCoverageGap,
@@ -34,7 +42,7 @@ from .monitor.models import (
     ProcessProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 
 class Storage:
@@ -345,6 +353,119 @@ class Storage:
                 )
                 current_ver = 5
 
+            # Migration 6: Phase 6 Candidate Change Generation, Ranking, and Audit Reviews
+            if current_ver < 6:
+                tbl_check = self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='investigations'"
+                ).fetchone()
+                if tbl_check:
+                    inv_cursor = self._conn.execute("PRAGMA table_info(investigations)")
+                    existing_inv_cols = {row["name"] for row in inv_cursor.fetchall()}
+
+                    if "onset_time_utc" not in existing_inv_cols:
+                        self._conn.execute("ALTER TABLE investigations ADD COLUMN onset_time_utc TEXT")
+                    if "onset_time_user" not in existing_inv_cols:
+                        self._conn.execute("ALTER TABLE investigations ADD COLUMN onset_time_user TEXT")
+                    if "onset_timezone" not in existing_inv_cols:
+                        self._conn.execute("ALTER TABLE investigations ADD COLUMN onset_timezone TEXT DEFAULT 'UTC'")
+                    if "last_known_good_utc" not in existing_inv_cols:
+                        self._conn.execute("ALTER TABLE investigations ADD COLUMN last_known_good_utc TEXT")
+                    if "correlation_window_json" not in existing_inv_cols:
+                        self._conn.execute("ALTER TABLE investigations ADD COLUMN correlation_window_json TEXT DEFAULT '{}'")
+                    if "ranking_version" not in existing_inv_cols:
+                        self._conn.execute("ALTER TABLE investigations ADD COLUMN ranking_version TEXT DEFAULT '1.0.0'")
+                    if "user_notes" not in existing_inv_cols:
+                        self._conn.execute("ALTER TABLE investigations ADD COLUMN user_notes TEXT DEFAULT ''")
+                else:
+                    self._conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS investigations (
+                            id TEXT PRIMARY KEY,
+                            symptom TEXT NOT NULL,
+                            target_system TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            baseline_id TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            coverage_limitations TEXT,
+                            scenario_id TEXT,
+                            scenario_hash TEXT,
+                            scenario_snapshot TEXT,
+                            engine_version TEXT,
+                            onset_time_utc TEXT,
+                            onset_time_user TEXT,
+                            onset_timezone TEXT DEFAULT 'UTC',
+                            last_known_good_utc TEXT,
+                            correlation_window_json TEXT DEFAULT '{}',
+                            ranking_version TEXT DEFAULT '1.0.0',
+                            user_notes TEXT DEFAULT ''
+                        )
+                        """
+                    )
+
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS investigation_candidates (
+                        candidate_id TEXT PRIMARY KEY,
+                        investigation_id TEXT NOT NULL,
+                        evidence_type TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        object_key TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        first_observed_utc TEXT NOT NULL,
+                        last_observed_utc TEXT NOT NULL,
+                        temporal_offset_sec REAL,
+                        before_value_json TEXT,
+                        after_value_json TEXT,
+                        process_id INTEGER,
+                        process_name TEXT,
+                        process_provenance TEXT NOT NULL,
+                        source_ids_json TEXT NOT NULL,
+                        evidence_ids_json TEXT NOT NULL,
+                        coverage_gaps_json TEXT NOT NULL,
+                        score REAL NOT NULL,
+                        score_breakdown_json TEXT NOT NULL,
+                        rank INTEGER NOT NULL,
+                        review_status TEXT NOT NULL,
+                        is_active INTEGER NOT NULL,
+                        reversibility TEXT NOT NULL,
+                        inclusion_reason TEXT NOT NULL,
+                        uncertainty_note TEXT NOT NULL,
+                        FOREIGN KEY (investigation_id) REFERENCES investigations(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_candidates_investigation 
+                    ON investigation_candidates(investigation_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_candidates_inv_rank 
+                    ON investigation_candidates(investigation_id, rank);
+
+                    CREATE TABLE IF NOT EXISTS candidate_reviews (
+                        review_id TEXT PRIMARY KEY,
+                        candidate_id TEXT NOT NULL,
+                        investigation_id TEXT NOT NULL,
+                        decision TEXT NOT NULL,
+                        previous_status TEXT NOT NULL,
+                        new_status TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        reviewed_at TEXT NOT NULL,
+                        FOREIGN KEY (candidate_id) REFERENCES investigation_candidates(candidate_id) ON DELETE CASCADE,
+                        FOREIGN KEY (investigation_id) REFERENCES investigations(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_candidate_reviews_candidate 
+                    ON candidate_reviews(candidate_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_candidate_reviews_inv 
+                    ON candidate_reviews(investigation_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (6, datetime('now'), 'Add Phase 6 candidate change generation, ranking, and review tracking');
+                    """
+                )
+                current_ver = 6
+
     def log_audit(
         self,
         investigation_id: str,
@@ -392,8 +513,10 @@ class Storage:
                 INSERT INTO investigations (
                     id, symptom, target_system, status, baseline_id, 
                     created_at, updated_at, coverage_limitations,
-                    scenario_id, scenario_hash, scenario_snapshot, engine_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    scenario_id, scenario_hash, scenario_snapshot, engine_version,
+                    onset_time_utc, onset_time_user, onset_timezone,
+                    last_known_good_utc, correlation_window_json, ranking_version, user_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     symptom=excluded.symptom,
                     target_system=excluded.target_system,
@@ -404,7 +527,14 @@ class Storage:
                     scenario_id=excluded.scenario_id,
                     scenario_hash=excluded.scenario_hash,
                     scenario_snapshot=excluded.scenario_snapshot,
-                    engine_version=excluded.engine_version
+                    engine_version=excluded.engine_version,
+                    onset_time_utc=excluded.onset_time_utc,
+                    onset_time_user=excluded.onset_time_user,
+                    onset_timezone=excluded.onset_timezone,
+                    last_known_good_utc=excluded.last_known_good_utc,
+                    correlation_window_json=excluded.correlation_window_json,
+                    ranking_version=excluded.ranking_version,
+                    user_notes=excluded.user_notes
                 """,
                 (
                     inv.id,
@@ -419,6 +549,13 @@ class Storage:
                     inv.scenario_hash,
                     inv.scenario_snapshot,
                     inv.engine_version,
+                    inv.onset_time_utc,
+                    inv.onset_time_user,
+                    inv.onset_timezone,
+                    inv.last_known_good_utc,
+                    inv.correlation_window_json,
+                    inv.ranking_version,
+                    inv.user_notes,
                 ),
             )
 
@@ -442,6 +579,13 @@ class Storage:
             scenario_hash=row["scenario_hash"] or "",
             scenario_snapshot=row["scenario_snapshot"] or "",
             engine_version=row["engine_version"] or ENGINE_VERSION,
+            onset_time_utc=row["onset_time_utc"] if "onset_time_utc" in row.keys() else None,
+            onset_time_user=row["onset_time_user"] if "onset_time_user" in row.keys() else None,
+            onset_timezone=row["onset_timezone"] if "onset_timezone" in row.keys() and row["onset_timezone"] else "UTC",
+            last_known_good_utc=row["last_known_good_utc"] if "last_known_good_utc" in row.keys() else None,
+            correlation_window_json=row["correlation_window_json"] if "correlation_window_json" in row.keys() and row["correlation_window_json"] else "{}",
+            ranking_version=row["ranking_version"] if "ranking_version" in row.keys() and row["ranking_version"] else "1.0.0",
+            user_notes=row["user_notes"] if "user_notes" in row.keys() and row["user_notes"] else "",
         )
 
     def list_investigations(self) -> list[Investigation]:
@@ -462,6 +606,13 @@ class Storage:
                 scenario_hash=row["scenario_hash"] or "",
                 scenario_snapshot=row["scenario_snapshot"] or "",
                 engine_version=row["engine_version"] or ENGINE_VERSION,
+                onset_time_utc=row["onset_time_utc"] if "onset_time_utc" in row.keys() else None,
+                onset_time_user=row["onset_time_user"] if "onset_time_user" in row.keys() else None,
+                onset_timezone=row["onset_timezone"] if "onset_timezone" in row.keys() and row["onset_timezone"] else "UTC",
+                last_known_good_utc=row["last_known_good_utc"] if "last_known_good_utc" in row.keys() else None,
+                correlation_window_json=row["correlation_window_json"] if "correlation_window_json" in row.keys() and row["correlation_window_json"] else "{}",
+                ranking_version=row["ranking_version"] if "ranking_version" in row.keys() and row["ranking_version"] else "1.0.0",
+                user_notes=row["user_notes"] if "user_notes" in row.keys() and row["user_notes"] else "",
             )
             for row in cursor.fetchall()
         ]
@@ -1029,224 +1180,176 @@ class Storage:
             for r in rows
         ]
 
-    def save_monitoring_session(self, session: MonitoringSession) -> None:
-        """Persist a completed or cancelled monitoring session with its events and gaps."""
+    # --- Phase 6 Candidate Changes & Review Audit Records ---
+
+    def _row_to_candidate(self, row: sqlite3.Row) -> CandidateChange:
+        sb_dict = json.loads(row["score_breakdown_json"])
+        breakdown = ScoreBreakdown(
+            evidence_type_score=sb_dict.get("evidence_type_score", 0.0),
+            proximity_score=sb_dict.get("proximity_score", 0.0),
+            target_relevance_score=sb_dict.get("target_relevance_score", 0.0),
+            provenance_score=sb_dict.get("provenance_score", 0.0),
+            corroboration_score=sb_dict.get("corroboration_score", 0.0),
+            gap_penalty=sb_dict.get("gap_penalty", 0.0),
+            total_score=sb_dict.get("total_score", 0.0),
+            rationale=sb_dict.get("rationale", ""),
+        )
+        return CandidateChange(
+            candidate_id=row["candidate_id"],
+            investigation_id=row["investigation_id"],
+            evidence_type=CandidateEvidenceType(row["evidence_type"]),
+            category=row["category"],
+            object_key=row["object_key"],
+            display_name=row["display_name"],
+            description=row["description"],
+            first_observed_utc=row["first_observed_utc"],
+            last_observed_utc=row["last_observed_utc"],
+            temporal_offset_sec=row["temporal_offset_sec"],
+            before_value=json.loads(row["before_value_json"]) if row["before_value_json"] is not None else None,
+            after_value=json.loads(row["after_value_json"]) if row["after_value_json"] is not None else None,
+            process_id=row["process_id"],
+            process_name=row["process_name"],
+            process_provenance=ProcessProvenance(row["process_provenance"]),
+            source_ids=json.loads(row["source_ids_json"]),
+            evidence_ids=json.loads(row["evidence_ids_json"]),
+            coverage_gaps=json.loads(row["coverage_gaps_json"]),
+            score=row["score"],
+            score_breakdown=breakdown,
+            rank=row["rank"],
+            review_status=CandidateReviewStatus(row["review_status"]),
+            is_active=bool(row["is_active"]),
+            reversibility=CandidateReversibility(row["reversibility"]),
+            inclusion_reason=row["inclusion_reason"],
+            uncertainty_note=row["uncertainty_note"],
+        )
+
+    def save_candidates(self, investigation_id: str, candidates: list[CandidateChange]) -> None:
+        """Persist a list of candidate changes for an investigation."""
         with self._conn:
-            self._conn.execute(
-                """
-                INSERT INTO monitoring_sessions (
-                    session_id, created_at, started_at, stopped_at, duration_sec, elapsed_sec,
-                    status, stop_reason, pre_snapshot_run_id, post_snapshot_run_id,
-                    sources_requested_json, sources_active_json, total_events,
-                    events_by_source_json, loss_indicators_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id) DO UPDATE SET
-                    stopped_at = excluded.stopped_at,
-                    elapsed_sec = excluded.elapsed_sec,
-                    status = excluded.status,
-                    stop_reason = excluded.stop_reason,
-                    post_snapshot_run_id = excluded.post_snapshot_run_id,
-                    total_events = excluded.total_events,
-                    events_by_source_json = excluded.events_by_source_json,
-                    loss_indicators_json = excluded.loss_indicators_json
-                """,
-                (
-                    session.session_id,
-                    session.created_at,
-                    session.started_at,
-                    session.stopped_at,
-                    session.duration_sec,
-                    session.elapsed_sec,
-                    session.status.value,
-                    session.stop_reason,
-                    session.pre_snapshot_run_id,
-                    session.post_snapshot_run_id,
-                    json.dumps(session.sources_requested),
-                    json.dumps(session.sources_active),
-                    session.total_events,
-                    json.dumps(session.events_by_source),
-                    json.dumps(session.loss_indicators),
-                ),
-            )
-
-            # Persist events
-            for ev in session.events:
+            for cand in candidates:
                 self._conn.execute(
                     """
-                    INSERT INTO monitoring_events (
-                        event_id, session_id, source_id, source_version, category,
-                        timestamp_utc, source_timestamp, channel_or_path, event_code,
-                        process_id, process_name, process_provenance, payload_json,
-                        is_redacted, is_truncated, confidence, raw_ref
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(event_id) DO NOTHING
+                    INSERT INTO investigation_candidates (
+                        candidate_id, investigation_id, evidence_type, category, object_key,
+                        display_name, description, first_observed_utc, last_observed_utc,
+                        temporal_offset_sec, before_value_json, after_value_json,
+                        process_id, process_name, process_provenance,
+                        source_ids_json, evidence_ids_json, coverage_gaps_json,
+                        score, score_breakdown_json, rank, review_status, is_active,
+                        reversibility, inclusion_reason, uncertainty_note
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(candidate_id) DO UPDATE SET
+                        score=excluded.score,
+                        score_breakdown_json=excluded.score_breakdown_json,
+                        rank=excluded.rank,
+                        review_status=excluded.review_status,
+                        is_active=excluded.is_active,
+                        reversibility=excluded.reversibility,
+                        inclusion_reason=excluded.inclusion_reason,
+                        uncertainty_note=excluded.uncertainty_note
                     """,
                     (
-                        ev.event_id,
-                        ev.session_id,
-                        ev.source_id,
-                        ev.source_version,
-                        ev.category,
-                        ev.timestamp_utc,
-                        ev.source_timestamp,
-                        ev.channel_or_path,
-                        ev.event_code,
-                        ev.process_id,
-                        ev.process_name,
-                        ev.process_provenance.value,
-                        json.dumps(ev.payload),
-                        1 if ev.is_redacted else 0,
-                        1 if ev.is_truncated else 0,
-                        ev.confidence.value,
-                        ev.raw_ref,
+                        cand.candidate_id,
+                        investigation_id,
+                        cand.evidence_type.value,
+                        cand.category,
+                        cand.object_key,
+                        cand.display_name,
+                        cand.description,
+                        cand.first_observed_utc,
+                        cand.last_observed_utc,
+                        cand.temporal_offset_sec,
+                        json.dumps(cand.before_value) if cand.before_value is not None else None,
+                        json.dumps(cand.after_value) if cand.after_value is not None else None,
+                        cand.process_id,
+                        cand.process_name,
+                        cand.process_provenance.value,
+                        json.dumps(cand.source_ids),
+                        json.dumps(cand.evidence_ids),
+                        json.dumps(cand.coverage_gaps),
+                        cand.score,
+                        json.dumps(cand.score_breakdown.to_dict()),
+                        cand.rank,
+                        cand.review_status.value,
+                        1 if cand.is_active else 0,
+                        cand.reversibility.value,
+                        cand.inclusion_reason,
+                        cand.uncertainty_note,
                     ),
                 )
 
-            # Persist coverage gaps
-            for gap in session.coverage_gaps:
-                self._conn.execute(
-                    """
-                    INSERT INTO monitoring_coverage_gaps (
-                        gap_id, session_id, source_id, category, reason, impact
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(gap_id) DO NOTHING
-                    """,
-                    (
-                        gap.gap_id,
-                        gap.session_id,
-                        gap.source_id,
-                        gap.category,
-                        gap.reason,
-                        gap.impact,
-                    ),
-                )
+    def get_candidates(self, investigation_id: str, active_only: bool = False) -> list[CandidateChange]:
+        """Fetch candidates for an investigation, ordered by rank ascending."""
+        query = "SELECT * FROM investigation_candidates WHERE investigation_id = ?"
+        params: list[Any] = [investigation_id]
+        if active_only:
+            query += " AND is_active = 1"
+        query += " ORDER BY rank ASC, score DESC"
+        rows = self._conn.execute(query, params).fetchall()
+        return [self._row_to_candidate(r) for r in rows]
 
-    def get_monitoring_session(self, session_id: str) -> MonitoringSession | None:
-        """Fetch a monitoring session by ID with its events and coverage gaps."""
+    def get_candidate(self, candidate_id: str) -> CandidateChange | None:
+        """Fetch a single candidate by its ID."""
         row = self._conn.execute(
-            "SELECT * FROM monitoring_sessions WHERE session_id = ?", (session_id,)
+            "SELECT * FROM investigation_candidates WHERE candidate_id = ?",
+            (candidate_id,),
         ).fetchone()
         if not row:
             return None
+        return self._row_to_candidate(row)
 
-        # Fetch events
-        ev_rows = self._conn.execute(
-            "SELECT * FROM monitoring_events WHERE session_id = ? ORDER BY timestamp_utc ASC",
-            (session_id,),
-        ).fetchall()
-        events = [
-            MonitoringEvent(
-                event_id=r["event_id"],
-                session_id=r["session_id"],
-                source_id=r["source_id"],
-                source_version=r["source_version"],
-                category=r["category"],
-                timestamp_utc=r["timestamp_utc"],
-                source_timestamp=r["source_timestamp"],
-                channel_or_path=r["channel_or_path"],
-                event_code=r["event_code"],
-                process_id=r["process_id"],
-                process_name=r["process_name"],
-                process_provenance=ProcessProvenance(r["process_provenance"]),
-                payload=json.loads(r["payload_json"]),
-                is_redacted=bool(r["is_redacted"]),
-                is_truncated=bool(r["is_truncated"]),
-                confidence=EventConfidence(r["confidence"]),
-                raw_ref=r["raw_ref"] or "",
+    def update_candidate_review_status(
+        self, candidate_id: str, new_status: CandidateReviewStatus, is_active: bool
+    ) -> None:
+        """Update candidate review status and active flag."""
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE investigation_candidates
+                SET review_status = ?, is_active = ?
+                WHERE candidate_id = ?
+                """,
+                (new_status.value, 1 if is_active else 0, candidate_id),
             )
-            for r in ev_rows
-        ]
 
-        # Fetch gaps
-        gap_rows = self._conn.execute(
-            "SELECT * FROM monitoring_coverage_gaps WHERE session_id = ?",
-            (session_id,),
-        ).fetchall()
-        gaps = [
-            MonitoringCoverageGap(
-                gap_id=g["gap_id"],
-                session_id=g["session_id"],
-                source_id=g["source_id"],
-                category=g["category"],
-                reason=g["reason"],
-                impact=g["impact"],
+    def record_candidate_review(self, review: CandidateReviewRecord) -> None:
+        """Record an immutable audit log entry for a candidate review decision."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO candidate_reviews (
+                    review_id, candidate_id, investigation_id, decision,
+                    previous_status, new_status, reason, reviewed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review.review_id,
+                    review.candidate_id,
+                    review.investigation_id,
+                    review.decision,
+                    review.previous_status.value,
+                    review.new_status.value,
+                    review.reason,
+                    review.reviewed_at,
+                ),
             )
-            for g in gap_rows
-        ]
 
-        return MonitoringSession(
-            session_id=row["session_id"],
-            created_at=row["created_at"],
-            started_at=row["started_at"],
-            stopped_at=row["stopped_at"],
-            duration_sec=row["duration_sec"],
-            elapsed_sec=row["elapsed_sec"],
-            status=MonitoringSessionStatus(row["status"]),
-            stop_reason=row["stop_reason"],
-            pre_snapshot_run_id=row["pre_snapshot_run_id"],
-            post_snapshot_run_id=row["post_snapshot_run_id"],
-            sources_requested=json.loads(row["sources_requested_json"]),
-            sources_active=json.loads(row["sources_active_json"]),
-            total_events=row["total_events"],
-            events_by_source=json.loads(row["events_by_source_json"]),
-            loss_indicators=json.loads(row["loss_indicators_json"]),
-            events=events,
-            coverage_gaps=gaps,
-        )
-
-    def list_monitoring_sessions(self) -> list[MonitoringSession]:
-        """List summary of monitoring sessions without loading all individual event bodies."""
+    def get_candidate_reviews(self, candidate_id: str) -> list[CandidateReviewRecord]:
+        """Fetch full review history audit log for a candidate."""
         rows = self._conn.execute(
-            "SELECT * FROM monitoring_sessions ORDER BY started_at DESC"
+            "SELECT * FROM candidate_reviews WHERE candidate_id = ? ORDER BY reviewed_at ASC",
+            (candidate_id,),
         ).fetchall()
         return [
-            MonitoringSession(
-                session_id=r["session_id"],
-                created_at=r["created_at"],
-                started_at=r["started_at"],
-                stopped_at=r["stopped_at"],
-                duration_sec=r["duration_sec"],
-                elapsed_sec=r["elapsed_sec"],
-                status=MonitoringSessionStatus(r["status"]),
-                stop_reason=r["stop_reason"],
-                pre_snapshot_run_id=r["pre_snapshot_run_id"],
-                post_snapshot_run_id=r["post_snapshot_run_id"],
-                sources_requested=json.loads(r["sources_requested_json"]),
-                sources_active=json.loads(r["sources_active_json"]),
-                total_events=r["total_events"],
-                events_by_source=json.loads(r["events_by_source_json"]),
-                loss_indicators=json.loads(r["loss_indicators_json"]),
-                events=[],
-                coverage_gaps=[],
-            )
-            for r in rows
-        ]
-
-    def get_monitoring_events(self, session_id: str, limit: int = 1000) -> list[MonitoringEvent]:
-        """Fetch event records for a session with optional limit."""
-        rows = self._conn.execute(
-            "SELECT * FROM monitoring_events WHERE session_id = ? ORDER BY timestamp_utc ASC LIMIT ?",
-            (session_id, limit),
-        ).fetchall()
-        return [
-            MonitoringEvent(
-                event_id=r["event_id"],
-                session_id=r["session_id"],
-                source_id=r["source_id"],
-                source_version=r["source_version"],
-                category=r["category"],
-                timestamp_utc=r["timestamp_utc"],
-                source_timestamp=r["source_timestamp"],
-                channel_or_path=r["channel_or_path"],
-                event_code=r["event_code"],
-                process_id=r["process_id"],
-                process_name=r["process_name"],
-                process_provenance=ProcessProvenance(r["process_provenance"]),
-                payload=json.loads(r["payload_json"]),
-                is_redacted=bool(r["is_redacted"]),
-                is_truncated=bool(r["is_truncated"]),
-                confidence=EventConfidence(r["confidence"]),
-                raw_ref=r["raw_ref"] or "",
+            CandidateReviewRecord(
+                review_id=r["review_id"],
+                candidate_id=r["candidate_id"],
+                investigation_id=r["investigation_id"],
+                decision=r["decision"],
+                previous_status=CandidateReviewStatus(r["previous_status"]),
+                new_status=CandidateReviewStatus(r["new_status"]),
+                reason=r["reason"],
+                reviewed_at=r["reviewed_at"],
             )
             for r in rows
         ]

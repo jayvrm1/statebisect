@@ -178,11 +178,52 @@
 ## Known Limitations
 - Monitoring is point-in-time observation during the active session; changes that occurred prior to session start cannot be reconstructed from monitoring alone (though prior snapshots and event logs can be inspected).
 - Process attribution for registry changes is unavailable in standard user space without kernel-level driver auditing.
-- Automated ranking and correlation of candidate changes with failure onset times are scheduled for Phase 6.
 
-## Next Phase: Phase 6 — Candidate Change Generation & Correlation Engine
-- **Entry Criteria**: Phase 5 acceptance criteria met (targeted opt-in change monitoring, 4 sources, gap awareness, process provenance, Schema Version 5 migrations, 85 tests passing, verified standard-user safety).
+## Phase 6: Candidate Change Generation & Correlation Engine
+- **Completed**:
+  - `statebisect/correlation/models.py`: Data models for candidates (`CandidateChange`, `CandidateEvidenceType`, `CandidateReviewStatus`, `CandidateReversibility`, `CorrelationWindow`, `ScoreBreakdown`, `CandidateReviewRecord`).
+  - `statebisect/correlation/ranker.py`: `CandidateRanker` computing transparent, explainable priority scores (0-100 pts) using deterministic weighted signals:
+    - Evidence Type Strength (0-30 pts): Confirmed snapshot diff (+30), Registry/Service change (+25), Event log (+18), App telemetry (+12).
+    - Temporal Proximity to Onset (0-30 pts): $\le 60$s before (+30), $\le 300$s (+25), $\le 900$s (+18), $\le 3600$s (+10), $>3600$s or fallback (+5). Changes occurring *after* onset receive 5 pts and are flagged as potential consequence/symptom.
+    - Target Relevance (0-20 pts): Direct substring match (+20), system infrastructure dependency (+10), unrelated (+0).
+    - Process Provenance (0-10 pts): `EVENT_PAYLOAD` with PID/name (+10), `PROCESS_LOOKUP` (+6), `UNAVAILABLE` (+2).
+    - Multi-Source Corroboration (0-10 pts): Independent multi-source observation (+10 bonus).
+    - Coverage Gap Penalty (0 to -10 pts): Subtracted penalty (-10) if category had recorded gaps.
+    - Deterministic tie-breaking: Score DESC -> Temporal Proximity ASC -> Evidence Weight DESC -> Candidate ID ASC.
+  - `statebisect/correlation/engine.py`: `CorrelationEngine` building configurable correlation windows (pre-onset, post-onset, timezone parsing), ingesting snapshot diffs (`SnapshotDiff`) and monitoring events (`MonitoringEvent`), corroborating overlapping evidence, and ranking deterministically. Supports untimed fallback when onset is missing.
+  - `statebisect/storage.py`: SQLite Schema Version 6 adding `investigation_candidates` and `candidate_reviews` tables with cascade deletion and indexing. Added `onset_time_utc`, `onset_time_user`, `onset_timezone`, `last_known_good_utc`, `correlation_window_json`, `ranking_version`, `user_notes` to `investigations`. Idempotent migration from v1-v5.
+  - `statebisect/cli.py`: Integrated subcommands:
+    - `create-investigation`: Creates investigation record with symptom, target, onset time, timezone, and notes.
+    - `generate-candidates`: Ingests diffs and monitoring events, builds bounded window, ranks candidates, and persists them.
+    - `list-candidates`: Lists candidates with ranks, scores, categories, and review statuses (supports `--active-only` and `--format json`).
+    - `inspect-candidate`: Full inspection of score breakdown, before/after values, process provenance, coverage gaps, and audit review history.
+    - `review-candidate`: Includes (`--include`) or excludes (`--exclude`) candidates with mandatory audit `--reason`. Excluded candidates are marked `is_active = False` to prevent silent inclusion in delta debugging.
+  - `tests/`: Added `tests/test_correlation.py`, updated `tests/test_cli.py` and `tests/test_migration.py`. Total test count: 99 tests across 12 modules, all passing.
+
+## Technology & Algorithm Decisions & Source Verification
+
+1. **Deterministic Priority Ranking (Phase 6)**:
+   - **Primary Source**: Delta Debugging principles (Zeller, 2002) and Microsoft Root Cause Analysis telemetry patterns.
+   - **Safety Boundary**: Machine learning models and black-box scoring algorithms are strictly excluded. The ranking is a transparent heuristic for determining trial order in Delta Debugging and is **never** presented to the user as proof or probability of causation.
+2. **Temporal Proximity and Post-Onset Consequence Handling (Phase 6)**:
+   - **Decision**: Changes occurring *after* the reported onset time receive a low proximity score (+5) and an explicit explanatory note in the score breakdown: `"Observed after symptom onset (possible consequence rather than cause)"`.
+   - **Tradeoff**: In real-world Windows failures, crash handlers, telemetry uploaders, and event logs trigger *after* the failure. Treating post-onset events as top causes leads to diagnosing the error handler rather than the root failure.
+3. **Multi-Source Corroboration Bonus (Phase 6)**:
+   - **Decision**: If a change was observed in both a snapshot diff and a live monitoring event, it receives a +10 corroboration bonus.
+   - **Tradeoff**: Corroboration demonstrates that the change was both actively executed (event log / watcher) and persisted in system state (snapshot diff), significantly reducing false positives from transient in-memory events.
+4. **Explicit User Review and Invariant on Excluded Candidates (Phase 6)**:
+   - **Decision**: Users can review each candidate change and mark it `EXCLUDED` with an audit reason.
+   - **Safety Invariant**: When a candidate is marked `EXCLUDED`, `is_active` is set to `False`. Downstream Delta Debugging runners and experiment generators must respect `active_only=True` and **never** silently reintroduce an excluded candidate into trial sets. All decisions are immutably logged in `candidate_reviews`.
+
+## Verification Results
+- All 99 unit and integration tests passing (`python -m unittest discover -s tests -v`).
+- Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
+- Full CLI investigation and candidate correlation workflow verified end-to-end (`create-investigation`, `generate-candidates`, `list-candidates`, `inspect-candidate`, `review-candidate`).
+- Schema migrations from v1 through v6 verified with zero data loss.
+
+## Next Phase: Phase 7 — Isolated Trial Runner & VM/Sandbox Abstraction
+- **Entry Criteria**: Phase 6 acceptance criteria met (candidate generation from diffs/events, deterministic explainable ranking, bounded correlation window, user review audit trail, Schema Version 6 migrations, 99 tests passing).
 - **Upcoming Deliverables**:
-  - Ingestion and normalization of candidate changes from snapshot diffs and monitoring sessions.
-  - Temporal correlation engine grouping candidate changes near reported failure onset.
-  - Candidate change extraction and dependency graph generation for feeding into Delta Debugging scenarios.
+  - Virtual machine / Windows Sandbox isolation boundary for safe reproduction of candidate changes.
+  - Safe state injection and snapshot revert lifecycle for Hyper-V / Sandbox.
+  - Integration of prioritized candidate sets with Delta Debugging runner in isolated environments.

@@ -7,6 +7,7 @@ import json
 import signal
 import sys
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +15,29 @@ from .collector import (
     COLLECTOR_VERSION,
     CollectionRun,
     DiffChangeType,
+    SnapshotDiff,
     WindowsCollector,
     compare_snapshots,
 )
-from .models import CancellationToken, InvestigationStatus, MinimizationResult
+from .correlation import (
+    CandidateChange,
+    CandidateEvidenceType,
+    CandidateRanker,
+    CandidateReversibility,
+    CandidateReviewRecord,
+    CandidateReviewStatus,
+    CorrelationEngine,
+    CorrelationWindow,
+    ScoreBreakdown,
+)
+from .correlation.engine import parse_iso_or_user_time
+from .models import (
+    CancellationToken,
+    Investigation,
+    InvestigationStatus,
+    MinimizationResult,
+    utc_now_iso,
+)
 from .monitor import (
     DEFAULT_DURATION_SEC,
     MAX_DURATION_SEC,
@@ -807,6 +827,377 @@ def cmd_inspect_monitor_session(args: argparse.Namespace) -> int:
             storage.close()
 
 
+def cmd_create_investigation(args: argparse.Namespace) -> int:
+    """Create a new investigation record with symptom, target, and optional onset time."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        inv_id = f"inv-{uuid.uuid4().hex[:12]}"
+
+        onset_utc_str = None
+        if args.onset:
+            dt_parsed = parse_iso_or_user_time(args.onset)
+            if dt_parsed:
+                onset_utc_str = dt_parsed.isoformat()
+
+        inv = Investigation(
+            id=inv_id,
+            symptom=args.symptom,
+            target_system=args.target or "",
+            status=InvestigationStatus.NEW,
+            onset_time_utc=onset_utc_str,
+            onset_time_user=args.onset,
+            onset_timezone=args.timezone or "UTC",
+            user_notes=args.notes or "",
+        )
+        storage.save_investigation(inv)
+        storage.log_audit(
+            investigation_id=inv_id,
+            event_type="INVESTIGATION_CREATED",
+            message=f"Created investigation for symptom: {args.symptom}",
+            details={"symptom": args.symptom, "target": args.target, "onset": args.onset},
+        )
+        print("=" * 80)
+        print(f"INVESTIGATION CREATED: {inv_id}")
+        print("=" * 80)
+        print(f"Symptom      : {inv.symptom}")
+        print(f"Target System: {inv.target_system or '(None specified)'}")
+        print(f"Onset Time   : {inv.onset_time_user or '(Untimed / None)'} (UTC: {inv.onset_time_utc or 'N/A'})")
+        print(f"Timezone     : {inv.onset_timezone}")
+        print(f"Status       : {inv.status.value}")
+        if inv.user_notes:
+            print(f"Notes        : {inv.user_notes}")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Error creating investigation: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_generate_candidates(args: argparse.Namespace) -> int:
+    """Generate and rank candidate changes from snapshot diffs and monitoring events."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        inv = storage.get_investigation(args.investigation_id)
+        if not inv:
+            print(f"Error: Investigation '{args.investigation_id}' not found.", file=sys.stderr)
+            return 1
+
+        engine = CorrelationEngine(storage)
+
+        # Determine onset time
+        onset_input = args.onset or inv.onset_time_user
+        tz_input = args.timezone or inv.onset_timezone or "UTC"
+        pre_sec = args.pre_onset_sec if args.pre_onset_sec is not None else 3600
+        post_sec = args.post_onset_sec if args.post_onset_sec is not None else 300
+
+        window = engine.build_correlation_window(
+            onset_time_str=onset_input,
+            pre_onset_sec=pre_sec,
+            post_onset_sec=post_sec,
+            timezone_str=tz_input,
+        )
+
+        diffs: list[SnapshotDiff] = []
+        if args.before_run and args.after_run:
+            diffs = storage.get_snapshot_diffs(args.before_run, args.after_run)
+            if not diffs:
+                # Attempt to compare on the fly if stored diffs don't exist
+                run_a = storage.get_collection_run(args.before_run)
+                run_b = storage.get_collection_run(args.after_run)
+                if run_a and run_b:
+                    diffs = compare_snapshots(run_a, run_b)
+                    storage.save_snapshot_diffs(diffs)
+
+        events: list[MonitoringEvent] = []
+        gaps: list[dict[str, Any]] = []
+        if args.monitor_session:
+            sess = storage.get_monitoring_session(args.monitor_session)
+            if sess:
+                events = sess.events
+                gaps = [{"category": g.category, "source_id": g.source_id, "reason": g.reason} for g in sess.coverage_gaps]
+
+        candidates = engine.generate_candidates(
+            investigation_id=inv.id,
+            target_system=inv.target_system,
+            window=window,
+            snapshot_diffs=diffs,
+            monitoring_events=events,
+            coverage_gaps=gaps,
+        )
+
+        storage.save_candidates(inv.id, candidates)
+        storage.log_audit(
+            investigation_id=inv.id,
+            event_type="CANDIDATES_GENERATED",
+            message=f"Generated {len(candidates)} candidate change(s) with ranking version {engine.ranker.version}",
+            details={"candidate_count": len(candidates), "ranking_version": engine.ranker.version},
+        )
+
+        if args.format == "json":
+            out_list = [
+                {
+                    "rank": c.rank,
+                    "candidate_id": c.candidate_id,
+                    "category": c.category,
+                    "object_key": c.object_key,
+                    "evidence_type": c.evidence_type.value,
+                    "score": c.score,
+                    "score_breakdown": c.score_breakdown.to_dict(),
+                    "first_observed_utc": c.first_observed_utc,
+                    "temporal_offset_sec": c.temporal_offset_sec,
+                    "review_status": c.review_status.value,
+                    "is_active": c.is_active,
+                    "process_name": c.process_name,
+                    "provenance": c.process_provenance.value,
+                }
+                for c in candidates
+            ]
+            print(json.dumps(out_list, indent=2))
+            return 0
+
+        print("=" * 80)
+        print(f"CANDIDATE CHANGES GENERATED FOR: {inv.id}")
+        print("=" * 80)
+        print(f"Ranking Engine Version : {engine.ranker.version} (deterministic)")
+        if window.is_untimed_fallback:
+            print("Correlation Window     : UNTIMED FALLBACK (No onset time provided; ranking reflects evidence & target)")
+        else:
+            print(f"Correlation Window     : [{window.window_start_utc}] to [{window.window_end_utc}] (Onset: {window.onset_time_utc})")
+        print(f"Total Candidates Found : {len(candidates)}")
+        print("-" * 80)
+        if not candidates:
+            print("No candidates identified from provided snapshot diffs or monitoring events.")
+        else:
+            print(f"{'Rank':<5} {'Score':<7} {'Candidate ID':<22} {'Evidence':<16} {'Category':<14} {'Object Key'}")
+            print("-" * 80)
+            for c in candidates:
+                print(f"{c.rank:<5} {c.score:>5.1f}  {c.candidate_id:<22} {c.evidence_type.value:<16} {c.category:<14} {c.object_key[:25]}")
+        print("=" * 80)
+        print("Caution: Candidate scores indicate correlation and experiment priority only.")
+        print("Candidate ranking does NOT prove causation. Use isolated experiments to verify.")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Candidate Generation Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_list_candidates(args: argparse.Namespace) -> int:
+    """List candidate changes for an investigation."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        candidates = storage.get_candidates(args.investigation_id, active_only=args.active_only)
+        if not candidates:
+            print(f"No candidates found for investigation '{args.investigation_id}'.")
+            return 0
+
+        if args.format == "json":
+            out_list = [
+                {
+                    "rank": c.rank,
+                    "candidate_id": c.candidate_id,
+                    "score": c.score,
+                    "review_status": c.review_status.value,
+                    "is_active": c.is_active,
+                    "evidence_type": c.evidence_type.value,
+                    "category": c.category,
+                    "object_key": c.object_key,
+                    "description": c.description,
+                }
+                for c in candidates
+            ]
+            print(json.dumps(out_list, indent=2))
+            return 0
+
+        print(f"Found {len(candidates)} candidate(s) for investigation '{args.investigation_id}':\n")
+        print(f"{'Rank':<5} {'Score':<7} {'Candidate ID':<22} {'Status':<10} {'Evidence':<16} {'Category':<12} {'Key'}")
+        print("-" * 85)
+        for c in candidates:
+            status_str = "ACTIVE" if c.is_active else "EXCLUDED"
+            print(f"{c.rank:<5} {c.score:>5.1f}  {c.candidate_id:<22} {status_str:<10} {c.evidence_type.value:<16} {c.category:<12} {c.object_key[:25]}")
+        return 0
+    except Exception as err:
+        print(f"Error listing candidates: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_inspect_candidate(args: argparse.Namespace) -> int:
+    """Detailed inspection of a candidate change, score breakdown, and review audit history."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        cand = storage.get_candidate(args.id)
+        if not cand:
+            print(f"Error: Candidate '{args.id}' not found.", file=sys.stderr)
+            return 1
+
+        reviews = storage.get_candidate_reviews(args.id)
+
+        if args.format == "json":
+            out_obj = {
+                "candidate_id": cand.candidate_id,
+                "investigation_id": cand.investigation_id,
+                "rank": cand.rank,
+                "score": cand.score,
+                "score_breakdown": cand.score_breakdown.to_dict(),
+                "evidence_type": cand.evidence_type.value,
+                "category": cand.category,
+                "object_key": cand.object_key,
+                "display_name": cand.display_name,
+                "description": cand.description,
+                "first_observed_utc": cand.first_observed_utc,
+                "last_observed_utc": cand.last_observed_utc,
+                "temporal_offset_sec": cand.temporal_offset_sec,
+                "before_value": cand.before_value,
+                "after_value": cand.after_value,
+                "process_id": cand.process_id,
+                "process_name": cand.process_name,
+                "process_provenance": cand.process_provenance.value,
+                "source_ids": cand.source_ids,
+                "evidence_ids": cand.evidence_ids,
+                "coverage_gaps": cand.coverage_gaps,
+                "review_status": cand.review_status.value,
+                "is_active": cand.is_active,
+                "reversibility": cand.reversibility.value,
+                "reviews": [
+                    {
+                        "review_id": r.review_id,
+                        "decision": r.decision,
+                        "previous_status": r.previous_status.value,
+                        "new_status": r.new_status.value,
+                        "reason": r.reason,
+                        "reviewed_at": r.reviewed_at,
+                    }
+                    for r in reviews
+                ],
+            }
+            print(json.dumps(out_obj, indent=2))
+            return 0
+
+        print("=" * 80)
+        print(f"CANDIDATE CHANGE INSPECTION: {cand.candidate_id}")
+        print("=" * 80)
+        print(f"Investigation ID : {cand.investigation_id}")
+        print(f"Rank / Priority  : #{cand.rank} (Score: {cand.score:.2f})")
+        print(f"Review Status    : {cand.review_status.value} (Active in Experiments: {cand.is_active})")
+        print(f"Evidence Type    : {cand.evidence_type.value}")
+        print(f"Category / Key   : [{cand.category}] {cand.object_key}")
+        print(f"Observed Time    : {cand.first_observed_utc} (Offset: {cand.temporal_offset_sec}s)")
+        print(f"Sources          : {', '.join(cand.source_ids)}")
+        print(f"Process Info     : {cand.process_name or 'N/A'} (PID: {cand.process_id or 'N/A'}, Provenance: {cand.process_provenance.value})")
+        print("-" * 80)
+        print("SCORE BREAKDOWN (DETERMINISTIC):")
+        sb = cand.score_breakdown
+        print(f"  Evidence Type Weight    : +{sb.evidence_type_score:.1f} pts")
+        print(f"  Temporal Proximity      : +{sb.proximity_score:.1f} pts")
+        print(f"  Target Relevance        : +{sb.target_relevance_score:.1f} pts")
+        print(f"  Process Provenance      : +{sb.provenance_score:.1f} pts")
+        print(f"  Corroboration Bonus     : +{sb.corroboration_score:.1f} pts")
+        print(f"  Coverage Gap Penalty    : {sb.gap_penalty:.1f} pts")
+        print(f"  Total Score             : {sb.total_score:.2f} pts")
+        print(f"  Scoring Rationale       : {sb.rationale}")
+        print("-" * 80)
+        print(f"BEFORE VALUE: {cand.before_value}")
+        print(f"AFTER VALUE : {cand.after_value}")
+        if cand.uncertainty_note:
+            print(f"UNCERTAINTY : {cand.uncertainty_note}")
+        if cand.coverage_gaps:
+            print("-" * 80)
+            print("RELEVANT COVERAGE GAPS:")
+            for g in cand.coverage_gaps:
+                print(f"  [{g.get('category')}] {g.get('source_id')}: {g.get('reason')}")
+        if reviews:
+            print("-" * 80)
+            print(f"USER REVIEW AUDIT TRAIL ({len(reviews)} review(s)):")
+            for r in reviews:
+                print(f"  [{r.reviewed_at}] {r.previous_status.value} -> {r.new_status.value}: {r.reason}")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Inspection Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_review_candidate(args: argparse.Namespace) -> int:
+    """Explicitly include or exclude a candidate change with audited reason."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        cand = storage.get_candidate(args.candidate_id)
+        if not cand:
+            print(f"Error: Candidate '{args.candidate_id}' not found.", file=sys.stderr)
+            return 1
+
+        is_include = args.include or (not args.exclude)
+        new_status = CandidateReviewStatus.INCLUDED if is_include else CandidateReviewStatus.EXCLUDED
+        is_active = (new_status == CandidateReviewStatus.INCLUDED)
+
+        if not args.reason or not args.reason.strip():
+            print("Error: An explicit review --reason must be provided.", file=sys.stderr)
+            return 1
+
+        review_rec = CandidateReviewRecord(
+            review_id=f"rev-{uuid.uuid4().hex[:12]}",
+            candidate_id=cand.candidate_id,
+            investigation_id=cand.investigation_id,
+            decision="INCLUDE" if is_active else "EXCLUDE",
+            previous_status=cand.review_status,
+            new_status=new_status,
+            reason=args.reason.strip(),
+            reviewed_at=utc_now_iso(),
+        )
+
+        storage.update_candidate_review_status(cand.candidate_id, new_status, is_active)
+        storage.record_candidate_review(review_rec)
+        storage.log_audit(
+            investigation_id=cand.investigation_id,
+            event_type="CANDIDATE_REVIEWED",
+            message=f"Candidate {cand.candidate_id} marked as {new_status.value}: {args.reason}",
+            details={"candidate_id": cand.candidate_id, "decision": review_rec.decision, "reason": args.reason},
+        )
+
+        print("=" * 80)
+        print(f"CANDIDATE REVIEW RECORDED: {cand.candidate_id}")
+        print("=" * 80)
+        print(f"Previous Status : {cand.review_status.value}")
+        print(f"New Status      : {new_status.value} (Active: {is_active})")
+        print(f"Audit Reason    : {args.reason}")
+        print(f"Reviewed At     : {review_rec.reviewed_at}")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Candidate Review Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -902,6 +1293,55 @@ def build_parser() -> argparse.ArgumentParser:
     p_mins.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_mins.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # Phase 6: create-investigation
+    p_cinv = subparsers.add_parser("create-investigation", help="Create a new investigation record.")
+    p_cinv.add_argument("--symptom", required=True, help="Description of observed failure or symptom.")
+    p_cinv.add_argument("--target", default="", help="Target application, service, or system component.")
+    p_cinv.add_argument("--onset", default=None, help="Estimated symptom onset timestamp (ISO format or YYYY-MM-DD HH:MM:SS).")
+    p_cinv.add_argument("--timezone", default="UTC", help="Timezone of onset timestamp (default: UTC).")
+    p_cinv.add_argument("--notes", default="", help="Optional context or operator notes.")
+    p_cinv.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_cinv.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # Phase 6: generate-candidates
+    p_gcand = subparsers.add_parser("generate-candidates", help="Correlate snapshot diffs and monitoring events to generate ranked candidates.")
+    p_gcand.add_argument("investigation_id", help="Investigation ID to generate candidates for.")
+    p_gcand.add_argument("--before-run", default=None, help="Baseline collection run ID.")
+    p_gcand.add_argument("--after-run", default=None, help="Target collection run ID.")
+    p_gcand.add_argument("--monitor-session", default=None, help="Monitoring session ID to correlate.")
+    p_gcand.add_argument("--onset", default=None, help="Override symptom onset timestamp.")
+    p_gcand.add_argument("--timezone", default=None, help="Override timezone for onset timestamp.")
+    p_gcand.add_argument("--pre-onset-sec", type=int, default=3600, help="Pre-onset correlation window in seconds (default: 3600).")
+    p_gcand.add_argument("--post-onset-sec", type=int, default=300, help="Post-onset correlation window in seconds (default: 300).")
+    p_gcand.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_gcand.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_gcand.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # Phase 6: list-candidates
+    p_lcand = subparsers.add_parser("list-candidates", help="List generated candidate changes for an investigation.")
+    p_lcand.add_argument("investigation_id", help="Investigation ID.")
+    p_lcand.add_argument("--active-only", action="store_true", help="Filter to active candidates only.")
+    p_lcand.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_lcand.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_lcand.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # Phase 6: inspect-candidate
+    p_icand = subparsers.add_parser("inspect-candidate", help="Detailed inspection of a candidate change, score breakdown, and review history.")
+    p_icand.add_argument("id", help="Candidate ID to inspect.")
+    p_icand.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_icand.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_icand.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # Phase 6: review-candidate
+    p_rcand = subparsers.add_parser("review-candidate", help="Audit review to include or exclude a candidate change.")
+    p_rcand.add_argument("candidate_id", help="Candidate ID to review.")
+    rev_group = p_rcand.add_mutually_exclusive_group(required=True)
+    rev_group.add_argument("--include", action="store_true", help="Include candidate in downstream experimentation.")
+    rev_group.add_argument("--exclude", action="store_true", help="Exclude candidate from downstream experimentation.")
+    p_rcand.add_argument("--reason", required=True, help="Required audit justification for inclusion or exclusion.")
+    p_rcand.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_rcand.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -941,6 +1381,16 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list_monitor_sessions(args)
     elif args.command == "inspect-monitor-session":
         return cmd_inspect_monitor_session(args)
+    elif args.command == "create-investigation":
+        return cmd_create_investigation(args)
+    elif args.command == "generate-candidates":
+        return cmd_generate_candidates(args)
+    elif args.command == "list-candidates":
+        return cmd_list_candidates(args)
+    elif args.command == "inspect-candidate":
+        return cmd_inspect_candidate(args)
+    elif args.command == "review-candidate":
+        return cmd_review_candidate(args)
     else:
         parser.print_help()
         return 2
