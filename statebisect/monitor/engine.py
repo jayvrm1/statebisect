@@ -276,45 +276,45 @@ class MonitoringEngine:
                         )
                     )
 
-            elapsed_final = round(time.perf_counter() - t_start, 2)
-            stopped_at = datetime.now(timezone.utc).isoformat()
+        elapsed_final = round(time.perf_counter() - t_start, 2)
+        stopped_at = datetime.now(timezone.utc).isoformat()
 
-            # Map status
-            if stop_reason == "USER_INTERRUPT":
-                status = MonitoringSessionStatus.CANCELLED
-            elif "ERROR" in stop_reason:
-                status = MonitoringSessionStatus.ERROR
-            elif stop_reason == "LIMIT_EXCEEDED":
-                status = MonitoringSessionStatus.COMPLETED
-            else:
-                status = MonitoringSessionStatus.COMPLETED
+        # Map status
+        if stop_reason == "USER_INTERRUPT":
+            status = MonitoringSessionStatus.CANCELLED
+        elif "ERROR" in stop_reason:
+            status = MonitoringSessionStatus.ERROR
+        elif stop_reason == "LIMIT_EXCEEDED":
+            status = MonitoringSessionStatus.COMPLETED
+        else:
+            status = MonitoringSessionStatus.COMPLETED
 
-            # Tally events by source
-            events_by_source: dict[str, int] = {}
-            for ev in all_events:
-                events_by_source[ev.source_id] = events_by_source.get(ev.source_id, 0) + 1
+        # Tally events by source
+        events_by_source: dict[str, int] = {}
+        for ev in all_events:
+            events_by_source[ev.source_id] = events_by_source.get(ev.source_id, 0) + 1
 
-            session = MonitoringSession(
-                session_id=session_id,
-                created_at=created_at,
-                started_at=started_at,
-                stopped_at=stopped_at,
-                duration_sec=duration_sec,
-                elapsed_sec=elapsed_final,
-                status=status,
-                stop_reason=stop_reason,
-                pre_snapshot_run_id=pre_snapshot_id,
-                post_snapshot_run_id=post_snapshot_id,
-                sources_requested=sources_requested,
-                sources_active=sources_active,
-                total_events=len(all_events),
-                events_by_source=events_by_source,
-                coverage_gaps=coverage_gaps,
-                loss_indicators=loss_indicators,
-                events=all_events,
-            )
+        session = MonitoringSession(
+            session_id=session_id,
+            created_at=created_at,
+            started_at=started_at,
+            stopped_at=stopped_at,
+            duration_sec=duration_sec,
+            elapsed_sec=elapsed_final,
+            status=status,
+            stop_reason=stop_reason,
+            pre_snapshot_run_id=pre_snapshot_id,
+            post_snapshot_run_id=post_snapshot_id,
+            sources_requested=sources_requested,
+            sources_active=sources_active,
+            total_events=len(all_events),
+            events_by_source=events_by_source,
+            coverage_gaps=coverage_gaps,
+            loss_indicators=loss_indicators,
+            events=all_events,
+        )
 
-            if storage:
-                storage.save_monitoring_session(session)
+        if storage:
+            storage.save_monitoring_session(session)
 
-            return session
+        return session
