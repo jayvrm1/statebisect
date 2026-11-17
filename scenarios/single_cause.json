@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0.0",
+  "id": "scenario-tls-downgrade",
+  "name": "TLS Gateway Cipher Deprecation",
+  "description": "PaymentGateway fails SSL handshake after dropping legacy ciphers.",
+  "simulation": true,
+  "baseline": {
+    "baseline_id": "baseline-tls-01",
+    "initial_state": {
+      "tls_version": "TLSv1.3",
+      "cipher_suites": ["ECDHE-RSA-AES128-GCM-SHA256", "ECDHE-RSA-AES256-GCM-SHA384"],
+      "max_connections": 1000,
+      "keepalive_sec": 60,
+      "http2_enabled": true,
+      "legacy_fallback": true,
+      "log_level": "INFO",
+      "auth_timeout_ms": 3000
+    }
+  },
+  "changes": [
+    {
+      "id": "C1",
+      "category": "network",
+      "description": "Increase auth timeout to 5000ms",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "auth_timeout_ms", "value": 5000 }
+    },
+    {
+      "id": "C2",
+      "category": "logging",
+      "description": "Enable verbose trace logging",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "log_level", "value": "TRACE" }
+    },
+    {
+      "id": "C3",
+      "category": "network",
+      "description": "Bump keepalive to 120s",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "keepalive_sec", "value": 120 }
+    },
+    {
+      "id": "C4",
+      "category": "crypto",
+      "description": "Drop legacy cipher suites and restrict to CHACHA20",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "cipher_suites", "value": ["CHACHA20-POLY1305"] }
+    },
+    {
+      "id": "C5",
+      "category": "performance",
+      "description": "Increase max connections to 2000",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "max_connections", "value": 2000 }
+    },
+    {
+      "id": "C6",
+      "category": "network",
+      "description": "Set TLS minimum version to TLSv1.3",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "tls_version", "value": "TLSv1.3" }
+    },
+    {
+      "id": "C7",
+      "category": "network",
+      "description": "Disable HTTP2 push",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "http2_push", "value": false }
+    },
+    {
+      "id": "C8",
+      "category": "diagnostics",
+      "description": "Enable ETW provider trace",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "etw_trace", "value": true }
+    }
+  ],
+  "health_check": {
+    "type": "compound_condition",
+    "parameters": {
+      "conditions": [
+        {
+          "key": "cipher_suites",
+          "op": "eq",
+          "value": ["CHACHA20-POLY1305"]
+        }
+      ]
+    },
+    "timeout_ms": 3000
+  },
+  "expected_outcome": "FAIL"
+}

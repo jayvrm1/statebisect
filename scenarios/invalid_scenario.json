@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "id": "scenario-invalid-injection",
+  "name": "Invalid Scenario with Disallowed Command",
+  "description": "This scenario demonstrates rejection of arbitrary shell commands.",
+  "simulation": true,
+  "baseline": {
+    "baseline_id": "baseline-invalid-01",
+    "initial_state": {}
+  },
+  "changes": [
+    {
+      "id": "C1",
+      "category": "malicious",
+      "description": "Attempt to run shell script",
+      "dependencies": [],
+      "operation": "set_key",
+      "command": "powershell.exe -ExecutionPolicy Bypass -Command 'Get-Process'",
+      "parameters": { "key": "injected", "value": true }
+    }
+  ],
+  "health_check": {
+    "type": "key_value_match",
+    "parameters": {
+      "key": "injected",
+      "expected_value": true
+    }
+  }
+}

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+
+ENGINE_VERSION = "0.2.0"
 
 
 class HealthCheckOutcome(str, Enum):
@@ -72,7 +75,7 @@ class ExperimentTrial:
 
 @dataclass
 class Investigation:
-    """Investigation lifecycle container."""
+    """Investigation lifecycle container with reproducibility metadata."""
 
     id: str
     symptom: str
@@ -82,6 +85,10 @@ class Investigation:
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     coverage_limitations: str = "Simulation environment; host system not inspected."
+    scenario_id: str = ""
+    scenario_hash: str = ""
+    scenario_snapshot: str = ""
+    engine_version: str = ENGINE_VERSION
 
 
 @dataclass
@@ -96,3 +103,35 @@ class MinimizationResult:
     rationale: str
     trials: list[ExperimentTrial] = field(default_factory=list)
 
+
+@dataclass
+class AuditLogEntry:
+    """Structured audit trail record for investigation lifecycle events."""
+
+    log_id: str
+    investigation_id: str
+    timestamp: str
+    level: str
+    event_type: str
+    message: str
+    details_json: str = "{}"
+
+
+class CancellationToken:
+    """Thread-safe cancellation token for halting runs between trials cleanly."""
+
+    def __init__(self) -> None:
+        self._cancelled = threading.Event()
+        self._reason: str = ""
+
+    def cancel(self, reason: str = "User cancelled execution") -> None:
+        self._reason = reason
+        self._cancelled.set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    @property
+    def reason(self) -> str:
+        return self._reason

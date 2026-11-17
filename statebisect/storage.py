@@ -1,63 +1,180 @@
-"""SQLite persistence layer for investigations and experiment trial history."""
+"""SQLite persistence layer with schema migrations and structured audit logging."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
-from .models import ExperimentTrial, HealthCheckOutcome, Investigation, InvestigationStatus
+from .models import (
+    AuditLogEntry,
+    ENGINE_VERSION,
+    ExperimentTrial,
+    HealthCheckOutcome,
+    Investigation,
+    InvestigationStatus,
+    utc_now_iso,
+)
+
+LATEST_SCHEMA_VERSION = 2
 
 
 class Storage:
-    """Manages SQLite storage for StateBisect audit and trial history."""
+    """Manages SQLite storage, migrations, and audit logging for StateBisect."""
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self.db_path = str(db_path)
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON;")
-        self._init_db()
+        self._apply_migrations()
 
     def close(self) -> None:
         """Close SQLite database connection."""
         if self._conn:
             self._conn.close()
 
-    def _init_db(self) -> None:
+    def get_current_schema_version(self) -> int:
+        """Get highest applied schema version."""
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        )
+        if not cursor.fetchone():
+            return 0
+        row = self._conn.execute("SELECT MAX(version) as max_v FROM schema_migrations").fetchone()
+        return row["max_v"] if row and row["max_v"] is not None else 0
+
+    def _apply_migrations(self) -> None:
+        """Execute transactional, repeat-safe schema migrations."""
         with self._conn:
-            self._conn.executescript(
+            # 1. Ensure schema_migrations table exists
+            self._conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS investigations (
-                    id TEXT PRIMARY KEY,
-                    symptom TEXT NOT NULL,
-                    target_system TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    baseline_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    coverage_limitations TEXT
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    description TEXT NOT NULL
                 );
-
-                CREATE TABLE IF NOT EXISTS experiment_trials (
-                    trial_id TEXT PRIMARY KEY,
-                    investigation_id TEXT NOT NULL,
-                    selected_change_ids TEXT NOT NULL,
-                    start_time TEXT NOT NULL,
-                    finish_time TEXT NOT NULL,
-                    outcome TEXT NOT NULL,
-                    health_output TEXT NOT NULL,
-                    reset_status TEXT NOT NULL,
-                    duration_ms REAL NOT NULL,
-                    notes TEXT,
-                    FOREIGN KEY (investigation_id) REFERENCES investigations(id)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_trials_investigation 
-                ON experiment_trials(investigation_id);
                 """
             )
+
+            current_ver = self.get_current_schema_version()
+
+            # Migration 1: Initial Phase 1 tables
+            if current_ver < 1:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS investigations (
+                        id TEXT PRIMARY KEY,
+                        symptom TEXT NOT NULL,
+                        target_system TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        baseline_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        coverage_limitations TEXT
+                    );
+
+                    CREATE TABLE IF NOT EXISTS experiment_trials (
+                        trial_id TEXT PRIMARY KEY,
+                        investigation_id TEXT NOT NULL,
+                        selected_change_ids TEXT NOT NULL,
+                        start_time TEXT NOT NULL,
+                        finish_time TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        health_output TEXT NOT NULL,
+                        reset_status TEXT NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        notes TEXT,
+                        FOREIGN KEY (investigation_id) REFERENCES investigations(id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_trials_investigation 
+                    ON experiment_trials(investigation_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (1, datetime('now'), 'Initial schema for investigations and trials');
+                    """
+                )
+                current_ver = 1
+
+            # Migration 2: Auditability, scenario snapshots, and structured logs
+            if current_ver < 2:
+                # Add columns to investigations if missing
+                cols_cursor = self._conn.execute("PRAGMA table_info(investigations)")
+                existing_cols = {row["name"] for row in cols_cursor.fetchall()}
+
+                if "scenario_id" not in existing_cols:
+                    self._conn.execute("ALTER TABLE investigations ADD COLUMN scenario_id TEXT DEFAULT ''")
+                if "scenario_hash" not in existing_cols:
+                    self._conn.execute("ALTER TABLE investigations ADD COLUMN scenario_hash TEXT DEFAULT ''")
+                if "scenario_snapshot" not in existing_cols:
+                    self._conn.execute("ALTER TABLE investigations ADD COLUMN scenario_snapshot TEXT DEFAULT ''")
+                if "engine_version" not in existing_cols:
+                    self._conn.execute("ALTER TABLE investigations ADD COLUMN engine_version TEXT DEFAULT '0.2.0'")
+
+                # Create structured audit logs table
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        log_id TEXT PRIMARY KEY,
+                        investigation_id TEXT,
+                        timestamp TEXT NOT NULL,
+                        level TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        details_json TEXT
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_audit_investigation 
+                    ON audit_logs(investigation_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (2, datetime('now'), 'Add scenario snapshots, reproducibility columns, and audit logs');
+                    """
+                )
+
+    def log_audit(
+        self,
+        investigation_id: str,
+        event_type: str,
+        message: str,
+        level: str = "INFO",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Insert a structured audit log entry."""
+        log_id = f"audit-{uuid.uuid4().hex[:12]}"
+        timestamp = utc_now_iso()
+        details_json = json.dumps(details or {})
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO audit_logs (log_id, investigation_id, timestamp, level, event_type, message, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (log_id, investigation_id, timestamp, level, event_type, message, details_json),
+            )
+
+    def get_audit_logs(self, investigation_id: str) -> list[AuditLogEntry]:
+        """Fetch audit log entries for an investigation."""
+        cursor = self._conn.execute(
+            "SELECT * FROM audit_logs WHERE investigation_id = ? ORDER BY timestamp ASC",
+            (investigation_id,),
+        )
+        return [
+            AuditLogEntry(
+                log_id=r["log_id"],
+                investigation_id=r["investigation_id"] or "",
+                timestamp=r["timestamp"],
+                level=r["level"],
+                event_type=r["event_type"],
+                message=r["message"],
+                details_json=r["details_json"] or "{}",
+            )
+            for r in cursor.fetchall()
+        ]
 
     def save_investigation(self, inv: Investigation) -> None:
         with self._conn:
@@ -65,15 +182,20 @@ class Storage:
                 """
                 INSERT INTO investigations (
                     id, symptom, target_system, status, baseline_id, 
-                    created_at, updated_at, coverage_limitations
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, coverage_limitations,
+                    scenario_id, scenario_hash, scenario_snapshot, engine_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     symptom=excluded.symptom,
                     target_system=excluded.target_system,
                     status=excluded.status,
                     baseline_id=excluded.baseline_id,
                     updated_at=excluded.updated_at,
-                    coverage_limitations=excluded.coverage_limitations
+                    coverage_limitations=excluded.coverage_limitations,
+                    scenario_id=excluded.scenario_id,
+                    scenario_hash=excluded.scenario_hash,
+                    scenario_snapshot=excluded.scenario_snapshot,
+                    engine_version=excluded.engine_version
                 """,
                 (
                     inv.id,
@@ -84,6 +206,10 @@ class Storage:
                     inv.created_at,
                     inv.updated_at,
                     inv.coverage_limitations,
+                    inv.scenario_id,
+                    inv.scenario_hash,
+                    inv.scenario_snapshot,
+                    inv.engine_version,
                 ),
             )
 
@@ -103,7 +229,33 @@ class Storage:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             coverage_limitations=row["coverage_limitations"] or "",
+            scenario_id=row["scenario_id"] or "",
+            scenario_hash=row["scenario_hash"] or "",
+            scenario_snapshot=row["scenario_snapshot"] or "",
+            engine_version=row["engine_version"] or ENGINE_VERSION,
         )
+
+    def list_investigations(self) -> list[Investigation]:
+        cursor = self._conn.execute(
+            "SELECT * FROM investigations ORDER BY created_at DESC"
+        )
+        return [
+            Investigation(
+                id=row["id"],
+                symptom=row["symptom"],
+                target_system=row["target_system"],
+                status=InvestigationStatus(row["status"]),
+                baseline_id=row["baseline_id"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                coverage_limitations=row["coverage_limitations"] or "",
+                scenario_id=row["scenario_id"] or "",
+                scenario_hash=row["scenario_hash"] or "",
+                scenario_snapshot=row["scenario_snapshot"] or "",
+                engine_version=row["engine_version"] or ENGINE_VERSION,
+            )
+            for row in cursor.fetchall()
+        ]
 
     def save_trial(self, trial: ExperimentTrial) -> None:
         with self._conn:

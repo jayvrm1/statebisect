@@ -74,7 +74,6 @@ class SimulatedWorkspace:
                 graph[dep].append(c.id)
 
         queue = [cid for cid, deg in in_degree.items() if deg == 0]
-        # Keep deterministic ordering
         queue.sort()
         ordered_ids: list[str] = []
 
@@ -92,8 +91,25 @@ class SimulatedWorkspace:
         # Apply state modifications in determined order
         for cid in ordered_ids:
             change = change_map[cid]
-            for key, val in change.payload.items():
-                self._current_state[key] = copy.deepcopy(val)
+            op = change.metadata.get("operation")
+            params = change.metadata.get("parameters", {})
+
+            if op == "delete_key":
+                key = params.get("key")
+                if key:
+                    self._current_state.pop(key, None)
+            elif op == "append_list":
+                key = params.get("key")
+                item = params.get("item")
+                if key:
+                    curr_list = list(self._current_state.get(key, []))
+                    curr_list.append(copy.deepcopy(item))
+                    self._current_state[key] = curr_list
+            else:
+                # Default: key-value dictionary overlay
+                for key, val in change.payload.items():
+                    self._current_state[key] = copy.deepcopy(val)
+
             self._applied_change_ids.append(cid)
 
         return ordered_ids
@@ -113,4 +129,3 @@ def create_key_value_health_check(
         return HealthCheckResult(outcome=outcome, output=message)
 
     return check
-

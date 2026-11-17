@@ -1,0 +1,97 @@
+{
+  "schema_version": "1.0.0",
+  "id": "scenario-http2-downgrade-interaction",
+  "name": "HTTP2 Protocol Reset Interaction",
+  "description": "OrderProcessingService resets connection only when strict HTTP/2 is enabled AND fallback is disabled.",
+  "simulation": true,
+  "baseline": {
+    "baseline_id": "baseline-order-01",
+    "initial_state": {
+      "http2_strict": false,
+      "legacy_protocol_fallback": true,
+      "buffer_size_kb": 64,
+      "compression": "gzip",
+      "pool_size": 50,
+      "tcp_nodelay": true,
+      "dns_cache_ttl_sec": 300,
+      "retry_limit": 3
+    }
+  },
+  "changes": [
+    {
+      "id": "C1",
+      "category": "performance",
+      "description": "Double connection pool to 100",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "pool_size", "value": 100 }
+    },
+    {
+      "id": "C2",
+      "category": "performance",
+      "description": "Increase buffer to 128KB",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "buffer_size_kb", "value": 128 }
+    },
+    {
+      "id": "C3",
+      "category": "protocol",
+      "description": "Enforce strict HTTP/2 protocol",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "http2_strict", "value": true }
+    },
+    {
+      "id": "C4",
+      "category": "performance",
+      "description": "Switch compression to zstd",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "compression", "value": "zstd" }
+    },
+    {
+      "id": "C5",
+      "category": "network",
+      "description": "Disable TCP NoDelay",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "tcp_nodelay", "value": false }
+    },
+    {
+      "id": "C6",
+      "category": "protocol",
+      "description": "Disable legacy protocol fallback",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "legacy_protocol_fallback", "value": false }
+    },
+    {
+      "id": "C7",
+      "category": "dns",
+      "description": "Lower DNS cache TTL to 60s",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "dns_cache_ttl_sec", "value": 60 }
+    },
+    {
+      "id": "C8",
+      "category": "reliability",
+      "description": "Increase retry limit to 5",
+      "dependencies": [],
+      "operation": "set_key",
+      "parameters": { "key": "retry_limit", "value": 5 }
+    }
+  ],
+  "health_check": {
+    "type": "compound_condition",
+    "parameters": {
+      "conditions": [
+        { "key": "http2_strict", "op": "eq", "value": true },
+        { "key": "legacy_protocol_fallback", "op": "eq", "value": false }
+      ]
+    },
+    "timeout_ms": 4000
+  },
+  "expected_outcome": "FAIL"
+}

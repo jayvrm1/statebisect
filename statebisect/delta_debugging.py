@@ -1,4 +1,4 @@
-"""Generalized Delta Debugging (ddmin) engine."""
+"""Generalized Delta Debugging (ddmin) engine with cancellation and integrity handling."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def partition(items: list[str], n: int) -> list[list[str]]:
 
 
 class DeltaDebugger:
-    """Implements generalized ddmin with support for interactions and inconclusive handling."""
+    """Implements generalized ddmin with support for interactions, inconclusive handling, and cancellation."""
 
     def __init__(
         self,
@@ -66,8 +66,31 @@ class DeltaDebugger:
         Returns:
             MinimizationResult detailing the minimal failure-inducing set.
         """
+        # Check cancellation before starting
+        if self.runner.cancellation_token.is_cancelled:
+            return MinimizationResult(
+                investigation_id=self.runner.investigation_id,
+                suspected_set=[],
+                is_1_minimal=False,
+                total_trials=len(self.trial_cache),
+                verdict="CANCELLED",
+                rationale=f"Investigation cancelled before starting: {self.runner.cancellation_token.reason}",
+                trials=list(self.trial_cache.values()),
+            )
+
         # 1. Verify baseline test([]) -> PASS
         baseline_trial = self._test([], notes="Baseline pre-check")
+        if baseline_trial.reset_status.startswith("FAILED"):
+            return MinimizationResult(
+                investigation_id=self.runner.investigation_id,
+                suspected_set=[],
+                is_1_minimal=False,
+                total_trials=len(self.trial_cache),
+                verdict="SIMULATION_CORRUPTED",
+                rationale=f"Baseline cleanup failed: {baseline_trial.reset_status}",
+                trials=list(self.trial_cache.values()),
+            )
+
         if baseline_trial.outcome != HealthCheckOutcome.PASS:
             return MinimizationResult(
                 investigation_id=self.runner.investigation_id,
@@ -82,8 +105,23 @@ class DeltaDebugger:
                 trials=list(self.trial_cache.values()),
             )
 
+        # Check cancellation
+        if self.runner.cancellation_token.is_cancelled:
+            return self._cancellation_result()
+
         # 2. Verify full candidate set test(candidate_ids) -> FAIL
         full_trial = self._test(candidate_ids, notes="Full candidate set pre-check")
+        if full_trial.reset_status.startswith("FAILED"):
+            return MinimizationResult(
+                investigation_id=self.runner.investigation_id,
+                suspected_set=[],
+                is_1_minimal=False,
+                total_trials=len(self.trial_cache),
+                verdict="SIMULATION_CORRUPTED",
+                rationale=f"Cleanup failed during full candidate test: {full_trial.reset_status}",
+                trials=list(self.trial_cache.values()),
+            )
+
         if full_trial.outcome == HealthCheckOutcome.PASS:
             return MinimizationResult(
                 investigation_id=self.runner.investigation_id,
@@ -113,12 +151,29 @@ class DeltaDebugger:
         n = 2
 
         while len(c) >= 2:
+            if self.runner.cancellation_token.is_cancelled:
+                return self._cancellation_result(suspected_subset=c)
+
             subsets = partition(c, n)
             reduced = False
 
             # Test individual subsets
             for delta in subsets:
+                if self.runner.cancellation_token.is_cancelled:
+                    return self._cancellation_result(suspected_subset=c)
+
                 trial = self._test(delta, notes=f"Testing subset of size {len(delta)} (granularity {n})")
+                if trial.reset_status.startswith("FAILED"):
+                    return MinimizationResult(
+                        investigation_id=self.runner.investigation_id,
+                        suspected_set=[],
+                        is_1_minimal=False,
+                        total_trials=len(self.trial_cache),
+                        verdict="SIMULATION_CORRUPTED",
+                        rationale=f"Cleanup failed during subset trial: {trial.reset_status}",
+                        trials=list(self.trial_cache.values()),
+                    )
+
                 if trial.outcome == HealthCheckOutcome.FAIL:
                     c = delta
                     n = max(n - 1, 2)
@@ -130,6 +185,9 @@ class DeltaDebugger:
 
             # Test complements (c \ delta)
             for delta in subsets:
+                if self.runner.cancellation_token.is_cancelled:
+                    return self._cancellation_result(suspected_subset=c)
+
                 complement = [item for item in c if item not in delta]
                 if not complement:
                     continue
@@ -137,6 +195,17 @@ class DeltaDebugger:
                     complement,
                     notes=f"Testing complement of size {len(complement)} (granularity {n})",
                 )
+                if trial.reset_status.startswith("FAILED"):
+                    return MinimizationResult(
+                        investigation_id=self.runner.investigation_id,
+                        suspected_set=[],
+                        is_1_minimal=False,
+                        total_trials=len(self.trial_cache),
+                        verdict="SIMULATION_CORRUPTED",
+                        rationale=f"Cleanup failed during complement trial: {trial.reset_status}",
+                        trials=list(self.trial_cache.values()),
+                    )
+
                 if trial.outcome == HealthCheckOutcome.FAIL:
                     c = complement
                     n = max(n - 1, 2)
@@ -153,6 +222,9 @@ class DeltaDebugger:
                 # Finished: no subset and no complement failed
                 break
 
+        if self.runner.cancellation_token.is_cancelled:
+            return self._cancellation_result(suspected_subset=c)
+
         # Verification: A set is 1-minimal if removing any single element causes health check != FAIL
         is_1_minimal = False
         verdict = "SUCCESS"
@@ -163,7 +235,6 @@ class DeltaDebugger:
         had_inconclusive_removal = False
 
         if len(c) == 1:
-            # Baseline already verified as PASS, so removing the single change yields baseline (PASS)
             is_1_minimal = True
             rationale = (
                 f"Isolated 1-minimal failure-inducing set: {c}. "
@@ -171,10 +242,24 @@ class DeltaDebugger:
             )
         else:
             for item in c:
+                if self.runner.cancellation_token.is_cancelled:
+                    return self._cancellation_result(suspected_subset=c)
+
                 without_item = [x for x in c if x != item]
                 sub_trial = self._test(
                     without_item, notes=f"1-minimality verification removing {item}"
                 )
+                if sub_trial.reset_status.startswith("FAILED"):
+                    return MinimizationResult(
+                        investigation_id=self.runner.investigation_id,
+                        suspected_set=[],
+                        is_1_minimal=False,
+                        total_trials=len(self.trial_cache),
+                        verdict="SIMULATION_CORRUPTED",
+                        rationale=f"Cleanup failed during verification: {sub_trial.reset_status}",
+                        trials=list(self.trial_cache.values()),
+                    )
+
                 if sub_trial.outcome == HealthCheckOutcome.FAIL:
                     all_single_removals_pass = False
                 elif sub_trial.outcome == HealthCheckOutcome.INCONCLUSIVE:
@@ -195,9 +280,7 @@ class DeltaDebugger:
                 )
             else:
                 is_1_minimal = False
-                rationale = (
-                    f"Candidate set {c} produces failure, but is not strictly 1-minimal."
-                )
+                rationale = f"Candidate set {c} produces failure, but is not strictly 1-minimal."
 
         return MinimizationResult(
             investigation_id=self.runner.investigation_id,
@@ -209,3 +292,13 @@ class DeltaDebugger:
             trials=list(self.trial_cache.values()),
         )
 
+    def _cancellation_result(self, suspected_subset: list[str] | None = None) -> MinimizationResult:
+        return MinimizationResult(
+            investigation_id=self.runner.investigation_id,
+            suspected_set=suspected_subset or [],
+            is_1_minimal=False,
+            total_trials=len(self.trial_cache),
+            verdict="CANCELLED",
+            rationale=f"Investigation cancelled by user: {self.runner.cancellation_token.reason}. No further trials executed.",
+            trials=list(self.trial_cache.values()),
+        )
