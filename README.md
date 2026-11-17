@@ -1,7 +1,7 @@
 # StateBisect
 
-> **Notice: Simulation & Controlled Health-Check Prototype**  
-> StateBisect is currently in a Phase 3 prototype state. All experiments run within an isolated virtual state and execute simulated or strictly bounded local health checks. **No modifications are made to the host Windows registry, files, services, or system configuration.**
+> **Notice: Read-Only Windows Collector & Controlled Simulation Environment**  
+> StateBisect is currently in a Phase 4 state. It features a strictly read-only Windows Collector MVP and isolated simulation/health-check execution. **No modifications are made to the host Windows registry, files, services, or system configuration.** All host telemetry collection executes with standard-user privileges.
 
 ## 1. Product Mission
 
@@ -35,6 +35,19 @@ statebisect/
 │   ├── __init__.py          # Public package exports
 │   ├── cli.py               # CLI interface (argparse)
 │   ├── models.py            # Dataclasses & Enums (Change, Trial, Evidence, CancellationToken)
+│   ├── collector/           # Read-only Windows collector & snapshot diffing (Phase 4)
+│   │   ├── base.py          # BaseCollectionSource abstract class & error boundaries
+│   │   ├── engine.py        # WindowsCollector engine & preview generator
+│   │   ├── models.py        # SnapshotRecord, CollectionRun, CoverageGap, SnapshotDiff
+│   │   ├── differ.py        # Gap-aware snapshot comparator (compare_snapshots)
+│   │   └── sources/         # 7 Read-only system telemetry sources
+│   │       ├── os_info.py   # OS release, build, architecture, and machine ID
+│   │       ├── installed_software.py # Read-only registry software inventory
+│   │       ├── windows_updates.py    # CIM Win32_QuickFixEngineering updates
+│   │       ├── services.py  # Read-only Win32 service state via registry
+│   │       ├── drivers.py   # Read-only kernel/filesystem driver inventory
+│   │       ├── network.py   # Read-only active network adapter configuration
+│   │       └── event_logs.py# Time-bounded Application/System event query via wevtutil
 │   ├── health_checks/       # Pluggable, versioned health-check system
 │   │   ├── base.py          # BaseHealthCheck, evidence bounding, and secret redaction
 │   │   ├── simulated_state.py # State condition matcher (key-value and compound)
@@ -48,10 +61,11 @@ statebisect/
 │   ├── storage.py           # SQLite persistence layer with schema migrations & evidence store
 │   └── reporting.py         # Diagnostic text and JSON report generators
 ├── tests/
+│   ├── test_collector.py    # Phase 4 collector, sources, diffing, and gap tests
 │   ├── test_health_checks.py# Phase 3 health check, evidence, and safety tests
 │   ├── test_scenarios.py    # Scenario schema validation and safety tests
 │   ├── test_cli.py          # CLI commands, formats, exit codes, and path tests
-│   ├── test_migration.py    # Schema migrations (v1->v2->v3) and audit logging tests
+│   ├── test_migration.py    # Schema migrations (v1->v2->v3->v4) and audit logging tests
 │   ├── test_cancellation.py # Interruption, cleanup, and corruption handling tests
 │   ├── test_simulation.py   # Workspace, baseline, and dependency tests
 │   ├── test_storage.py      # SQLite storage and query tests
@@ -91,36 +105,64 @@ Health checks determine whether a specific symptom is observed (`FAIL`), absent 
 - All output strings are sanitized via `redact_sensitive_text` to scrub passwords, tokens, API keys, and bearer tokens.
 - Evidence strings are bounded to 4096 characters to prevent log explosion.
 
-## 5. Persistence, Evidence Model & Migrations
+## 5. Read-Only Windows Collector MVP (Phase 4)
+
+StateBisect includes an opt-in, read-only Windows system collector that gathers structured inventory and diagnostic snapshots without requiring administrator rights or altering system settings.
+
+### 7 Safe Read-Only Collection Sources:
+1. **`os_info`**: Gathers OS product name, build, release, architecture, and a pseudonymized machine identifier (`machine-{sha256(hostname)[:16]}`). No hardware serials or unhashed identifiers.
+2. **`installed_software`**: In-process registry enumeration of 64-bit and 32-bit (`WOW6432Node`) uninstall keys via `winreg.KEY_READ`.
+3. **`windows_updates`**: Gathers installed hotfixes and KBs via `Get-CimInstance Win32_QuickFixEngineering`.
+4. **`services`**: In-process registry inspection of `HKLM\SYSTEM\CurrentControlSet\Services` identifying Win32 services and start types without invoking `sc.exe`.
+5. **`drivers`**: In-process registry inspection identifying kernel and filesystem drivers.
+6. **`network`**: Queries active network adapters and IP configurations via CIM.
+7. **`event_logs`**: Time-bounded query of `Application` and `System` channels via `wevtutil` structured XML. **Security log is excluded by default** as it requires elevated privileges.
+
+### Gap-Aware Snapshot Differ (`compare_snapshots`):
+- Compares baseline and subsequent snapshot runs to classify changes as `ADDED`, `REMOVED`, or `MODIFIED`.
+- **Safety Invariant**: If either snapshot had a `CoverageGap` in a given category, missing items in that category are strictly marked **`UNKNOWN`** rather than falsely inferred as `REMOVED` or `MODIFIED`.
+- Configuration differences are explicitly flagged as correlations, requiring controlled experiments to establish causation.
+
+## 6. Persistence, Evidence Model & Migrations
 
 - Default database: `data/statebisect.db`.
 - **Schema Migrations**:
-  - Automatically manages migrations up to Version 3 in `schema_migrations`.
-  - Non-destructive and idempotent: preserves all existing investigations and trials from earlier phases.
-  - Adds `health_check_evidence` table recording each individual attempt with timestamps, exit codes, expected vs observed values, and truncation/redaction indicators.
+  - Automatically manages migrations up to Version 4 in `schema_migrations`.
+  - Non-destructive and idempotent: preserves all existing investigations, trials, and audit records.
+  - Tables:
+    - `investigations`, `experiment_trials`, `audit_logs`, `health_check_evidence` (Phases 1–3).
+    - `collection_runs`, `snapshot_records`, `coverage_gaps`, `snapshot_diffs` (Phase 4).
 
-## 6. Command-Line Interface (CLI)
+## 7. Command-Line Interface (CLI)
 
 ```powershell
-# List scenarios
+# --- Investigation & Simulation Commands ---
 python statebisect_cli.py list-scenarios
-
-# Validate scenario file
 python statebisect_cli.py validate-scenario scenarios/repeated_health_check.json
-
-# Execute scenario
 python statebisect_cli.py run-scenario scenarios/repeated_health_check.json
-
-# Inspect investigation with recorded attempts
 python statebisect_cli.py inspect-investigation <investigation_id>
-
-# Export structured report
 python statebisect_cli.py export-report <investigation_id> --format json -o report.json
+
+# --- Read-Only Windows Collector Commands (Phase 4) ---
+# Preview collection sources and safety limits (dry run)
+python statebisect_cli.py collect-preview --lookback-sec 3600 --max-records 100
+
+# Run read-only collection and record snapshot to SQLite
+python statebisect_cli.py collect-windows --lookback-sec 3600 --max-records 100
+
+# List stored collection snapshots
+python statebisect_cli.py list-collections
+
+# Inspect a collection run and record samples
+python statebisect_cli.py inspect-collection <collection_run_id>
+
+# Compare two snapshot runs with gap-aware diffing
+python statebisect_cli.py compare-snapshots <base_run_id> <target_run_id>
 ```
 
-## 7. Running Tests and Demos
+## 8. Running Tests and Demos
 
-### Run Full Test Suite (52 Tests)
+### Run Full Test Suite (69 Tests Across 10 Modules)
 ```powershell
 python -m unittest discover -s tests -v
 ```
@@ -130,10 +172,11 @@ python -m unittest discover -s tests -v
 python demo_phase1.py
 ```
 
-## 8. Phase Status
+## 9. Phase Status
 
 - [x] **Phase 0 — Repository review & product skeleton**: Completed.
 - [x] **Phase 1 — Simulated experiment runner & Delta Debugging**: Completed.
 - [x] **Phase 2 — Experiment definitions, CLI, and auditability**: Completed.
 - [x] **Phase 3 — Failure health checks and evidence model**: Completed.
-- [ ] **Phase 4 — Windows read-only collector MVP**: Next phase.
+- [x] **Phase 4 — Windows read-only collector MVP**: Completed.
+- [ ] **Phase 5 — Targeted continuous collection & lightweight monitoring**: Next phase.

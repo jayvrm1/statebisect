@@ -121,6 +121,71 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Path traversal", err)
 
+    def test_cli_collect_preview(self):
+        code, out, _ = self.run_cli(["collect-preview"])
+        self.assertEqual(code, 0)
+        self.assertIn("STATEBISECT WINDOWS COLLECTOR PREVIEW", out)
+        self.assertIn("READ-ONLY GUARANTEE", out)
+        self.assertIn("os_info", out)
+        self.assertIn("installed_software", out)
+
+    def test_cli_collect_windows_and_inspect_and_diff(self):
+        # 1. Run collection with small limit
+        code, out, err = self.run_cli([
+            "collect-windows",
+            "--db", self.db_path,
+            "--max-records", "5",
+            "--lookback-minutes", "10",
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("COLLECTION RUN SUMMARY", out)
+        self.assertIn("Run ID", out)
+
+        # 2. Extract Run ID
+        from statebisect.storage import Storage
+        storage = Storage(self.db_path)
+        runs = storage.list_collection_runs()
+        storage.close()
+        self.assertEqual(len(runs), 1)
+        run_1_id = runs[0].run_id
+
+        # 3. List collections
+        code, out, _ = self.run_cli(["list-collections", "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn(run_1_id, out)
+
+        # 4. Inspect collection
+        code, out, _ = self.run_cli(["inspect-collection", run_1_id, "--db", self.db_path])
+        self.assertEqual(code, 0)
+        self.assertIn(f"COLLECTION RUN: {run_1_id}", out)
+        self.assertIn("RECORDS SUMMARY BY CATEGORY:", out)
+
+        # 5. Run a second collection for diffing
+        code, _, _ = self.run_cli([
+            "collect-windows",
+            "--db", self.db_path,
+            "--max-records", "5",
+            "--lookback-minutes", "10",
+        ])
+        self.assertEqual(code, 0)
+        storage = Storage(self.db_path)
+        runs = storage.list_collection_runs()
+        storage.close()
+        self.assertEqual(len(runs), 2)
+        run_2_id = runs[0].run_id
+
+        # 6. Compare snapshots
+        code, out, _ = self.run_cli([
+            "compare-snapshots",
+            run_1_id,
+            run_2_id,
+            "--db", self.db_path,
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("SNAPSHOT COMPARISON MATRIX", out)
+        self.assertIn(f"Before Run  : {run_1_id}", out)
+        self.assertIn(f"After Run   : {run_2_id}", out)
+
 
 if __name__ == "__main__":
     unittest.main()

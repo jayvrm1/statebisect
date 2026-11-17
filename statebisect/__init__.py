@@ -1,5 +1,18 @@
 """StateBisect: Deterministic configuration delta-debugging and investigation system."""
 
+from .collector import (
+    BaseCollectionSource,
+    COLLECTOR_VERSION,
+    CollectionResult,
+    CollectionRun,
+    CoverageGap,
+    DiffChangeType,
+    SnapshotDiff,
+    SnapshotRecord,
+    SourceStatus,
+    WindowsCollector,
+    compare_snapshots,
+)
 from .health_checks import (
     BaseHealthCheck,
     HealthCheckConfigurationError,
@@ -48,11 +61,17 @@ from .scenarios import (
 __version__ = ENGINE_VERSION
 __all__ = [
     "AuditLogEntry",
+    "BaseCollectionSource",
     "BaseHealthCheck",
     "CancellationToken",
     "Change",
+    "COLLECTOR_VERSION",
+    "CollectionResult",
+    "CollectionRun",
+    "CoverageGap",
     "DeclarativeScenario",
     "DeltaDebugger",
+    "DiffChangeType",
     "ENGINE_VERSION",
     "ExperimentRunner",
     "ExperimentTrial",
@@ -73,11 +92,16 @@ __all__ = [
     "ScenarioValidationError",
     "SimulatedStateCheck",
     "SimulatedWorkspace",
+    "SnapshotDiff",
+    "SnapshotRecord",
+    "SourceStatus",
     "Storage",
     "SUPPORTED_CHECK_TYPES",
     "SUPPORTED_CHECK_VERSIONS",
+    "WindowsCollector",
     "bound_evidence",
     "build_declarative_health_check",
+    "compare_snapshots",
     "create_health_check",
     "create_key_value_health_check",
     "execute_scenario",

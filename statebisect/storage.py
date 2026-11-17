@@ -1,4 +1,4 @@
-"""SQLite persistence layer with schema migrations and structured audit logging."""
+"""SQLite persistence layer with schema migrations, audit logging, and collection snapshots."""
 
 from __future__ import annotations
 
@@ -8,6 +8,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .collector.models import (
+    CollectionRun,
+    CoverageGap,
+    DiffChangeType,
+    SnapshotDiff,
+    SnapshotRecord,
+)
 from .models import (
     AuditLogEntry,
     ENGINE_VERSION,
@@ -19,11 +26,11 @@ from .models import (
     utc_now_iso,
 )
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 class Storage:
-    """Manages SQLite storage, migrations, and audit logging for StateBisect."""
+    """Manages SQLite storage, migrations, audit logging, and snapshots for StateBisect."""
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self.db_path = str(db_path)
@@ -138,7 +145,6 @@ class Storage:
 
             # Migration 3: Phase 3 Health Check Evidence model
             if current_ver < 3:
-                # Add check metadata to experiment_trials if missing
                 trials_cursor = self._conn.execute("PRAGMA table_info(experiment_trials)")
                 existing_trial_cols = {row["name"] for row in trials_cursor.fetchall()}
 
@@ -185,6 +191,78 @@ class Storage:
                     """
                 )
                 current_ver = 3
+
+            # Migration 4: Phase 4 Windows Collector Snapshots, Gaps, and Diffs
+            if current_ver < 4:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS collection_runs (
+                        run_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT NOT NULL,
+                        collector_version TEXT NOT NULL,
+                        os_platform TEXT NOT NULL,
+                        machine_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        summary_json TEXT
+                    );
+
+                    CREATE TABLE IF NOT EXISTS snapshot_records (
+                        record_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        object_key TEXT NOT NULL,
+                        data_json TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        is_redacted INTEGER NOT NULL,
+                        is_truncated INTEGER NOT NULL,
+                        FOREIGN KEY (run_id) REFERENCES collection_runs(run_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_snapshot_records_run 
+                    ON snapshot_records(run_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_snapshot_records_key 
+                    ON snapshot_records(object_key);
+
+                    CREATE TABLE IF NOT EXISTS coverage_gaps (
+                        gap_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        impact TEXT NOT NULL,
+                        FOREIGN KEY (run_id) REFERENCES collection_runs(run_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_coverage_gaps_run 
+                    ON coverage_gaps(run_id);
+
+                    CREATE TABLE IF NOT EXISTS snapshot_diffs (
+                        diff_id TEXT PRIMARY KEY,
+                        before_run_id TEXT NOT NULL,
+                        after_run_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        object_key TEXT NOT NULL,
+                        change_type TEXT NOT NULL,
+                        before_json TEXT,
+                        after_json TEXT,
+                        status TEXT NOT NULL,
+                        notes TEXT,
+                        FOREIGN KEY (before_run_id) REFERENCES collection_runs(run_id),
+                        FOREIGN KEY (after_run_id) REFERENCES collection_runs(run_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_snapshot_diffs_runs 
+                    ON snapshot_diffs(before_run_id, after_run_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (4, datetime('now'), 'Add Windows collection runs, snapshot records, coverage gaps, and diffs');
+                    """
+                )
+                current_ver = 4
 
     def log_audit(
         self,
@@ -410,7 +488,6 @@ class Storage:
                 ),
             )
 
-        # Save any associated individual attempt records
         for att in trial.attempts:
             self.save_evidence_attempt(
                 attempt=att,
@@ -450,3 +527,201 @@ class Storage:
                 )
             )
         return trials
+
+    # Phase 4 Collection & Snapshot Persistence
+    def save_collection_run(self, run: CollectionRun) -> None:
+        """Persist a complete snapshot collection run, its records, and coverage gaps."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO collection_runs (
+                    run_id, created_at, finished_at, collector_version,
+                    os_platform, machine_id, status, duration_ms, summary_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    status=excluded.status,
+                    duration_ms=excluded.duration_ms,
+                    summary_json=excluded.summary_json
+                """,
+                (
+                    run.run_id,
+                    run.created_at,
+                    run.finished_at,
+                    run.collector_version,
+                    run.os_platform,
+                    run.machine_id,
+                    run.status,
+                    run.duration_ms,
+                    json.dumps(run.summary),
+                ),
+            )
+
+            # Insert snapshot records in batch
+            for rec in run.records:
+                self._conn.execute(
+                    """
+                    INSERT INTO snapshot_records (
+                        record_id, run_id, category, object_key, data_json,
+                        timestamp, source_id, is_redacted, is_truncated
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(record_id) DO NOTHING
+                    """,
+                    (
+                        rec.record_id,
+                        run.run_id,
+                        rec.category,
+                        rec.object_key,
+                        json.dumps(rec.data),
+                        rec.timestamp,
+                        rec.source_id,
+                        1 if rec.is_redacted else 0,
+                        1 if rec.is_truncated else 0,
+                    ),
+                )
+
+            # Insert coverage gaps
+            for gap in run.coverage_gaps:
+                self._conn.execute(
+                    """
+                    INSERT INTO coverage_gaps (
+                        gap_id, run_id, source_id, category, reason, impact
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(gap_id) DO NOTHING
+                    """,
+                    (
+                        gap.gap_id,
+                        run.run_id,
+                        gap.source_id,
+                        gap.category,
+                        gap.reason,
+                        gap.impact,
+                    ),
+                )
+
+    def get_collection_run(self, run_id: str) -> CollectionRun | None:
+        """Fetch a collection run with all its snapshot records and coverage gaps."""
+        row = self._conn.execute(
+            "SELECT * FROM collection_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if not row:
+            return None
+
+        # Fetch records
+        rec_rows = self._conn.execute(
+            "SELECT * FROM snapshot_records WHERE run_id = ? ORDER BY category, object_key",
+            (run_id,),
+        ).fetchall()
+        records = [
+            SnapshotRecord(
+                record_id=r["record_id"],
+                run_id=r["run_id"],
+                category=r["category"],
+                object_key=r["object_key"],
+                data=json.loads(r["data_json"]),
+                timestamp=r["timestamp"],
+                source_id=r["source_id"],
+                is_redacted=bool(r["is_redacted"]),
+                is_truncated=bool(r["is_truncated"]),
+            )
+            for r in rec_rows
+        ]
+
+        # Fetch gaps
+        gap_rows = self._conn.execute(
+            "SELECT * FROM coverage_gaps WHERE run_id = ?", (run_id,)
+        ).fetchall()
+        gaps = [
+            CoverageGap(
+                gap_id=g["gap_id"],
+                run_id=g["run_id"],
+                source_id=g["source_id"],
+                category=g["category"],
+                reason=g["reason"],
+                impact=g["impact"],
+            )
+            for g in gap_rows
+        ]
+
+        return CollectionRun(
+            run_id=row["run_id"],
+            created_at=row["created_at"],
+            finished_at=row["finished_at"],
+            collector_version=row["collector_version"],
+            os_platform=row["os_platform"],
+            machine_id=row["machine_id"],
+            status=row["status"],
+            duration_ms=row["duration_ms"],
+            summary=json.loads(row["summary_json"] or "{}"),
+            records=records,
+            coverage_gaps=gaps,
+        )
+
+    def list_collection_runs(self) -> list[CollectionRun]:
+        """List all collection runs without loading all record bodies."""
+        rows = self._conn.execute(
+            "SELECT * FROM collection_runs ORDER BY created_at DESC"
+        ).fetchall()
+        return [
+            CollectionRun(
+                run_id=r["run_id"],
+                created_at=r["created_at"],
+                finished_at=r["finished_at"],
+                collector_version=r["collector_version"],
+                os_platform=r["os_platform"],
+                machine_id=r["machine_id"],
+                status=r["status"],
+                duration_ms=r["duration_ms"],
+                summary=json.loads(r["summary_json"] or "{}"),
+                records=[],
+                coverage_gaps=[],
+            )
+            for r in rows
+        ]
+
+    def save_snapshot_diffs(self, diffs: list[SnapshotDiff]) -> None:
+        """Persist snapshot comparison difference records."""
+        with self._conn:
+            for d in diffs:
+                self._conn.execute(
+                    """
+                    INSERT INTO snapshot_diffs (
+                        diff_id, before_run_id, after_run_id, category, object_key,
+                        change_type, before_json, after_json, status, notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(diff_id) DO NOTHING
+                    """,
+                    (
+                        d.diff_id,
+                        d.before_run_id,
+                        d.after_run_id,
+                        d.category,
+                        d.object_key,
+                        d.change_type.value,
+                        json.dumps(d.before_data) if d.before_data is not None else None,
+                        json.dumps(d.after_data) if d.after_data is not None else None,
+                        d.status,
+                        d.notes,
+                    ),
+                )
+
+    def get_snapshot_diffs(self, before_run_id: str, after_run_id: str) -> list[SnapshotDiff]:
+        """Fetch stored snapshot differences between two collection runs."""
+        rows = self._conn.execute(
+            "SELECT * FROM snapshot_diffs WHERE before_run_id = ? AND after_run_id = ? ORDER BY category, object_key",
+            (before_run_id, after_run_id),
+        ).fetchall()
+        return [
+            SnapshotDiff(
+                diff_id=r["diff_id"],
+                before_run_id=r["before_run_id"],
+                after_run_id=r["after_run_id"],
+                category=r["category"],
+                object_key=r["object_key"],
+                change_type=DiffChangeType(r["change_type"]),
+                before_data=json.loads(r["before_json"]) if r["before_json"] else None,
+                after_data=json.loads(r["after_json"]) if r["after_json"] else None,
+                status=r["status"],
+                notes=r["notes"] or "",
+            )
+            for r in rows
+        ]

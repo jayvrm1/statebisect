@@ -10,6 +10,13 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from .collector import (
+    COLLECTOR_VERSION,
+    CollectionRun,
+    DiffChangeType,
+    WindowsCollector,
+    compare_snapshots,
+)
 from .models import CancellationToken, InvestigationStatus, MinimizationResult
 from .reporting import generate_json_report, generate_text_report
 from .scenarios import (
@@ -288,6 +295,259 @@ def cmd_export_report(args: argparse.Namespace) -> int:
             storage.close()
 
 
+def cmd_collect_preview(args: argparse.Namespace) -> int:
+    """Preview read-only collection sources, lookback window, and limits."""
+    collector = WindowsCollector()
+    lookback = args.lookback_minutes * 60 if getattr(args, "lookback_minutes", None) is not None else args.lookback_sec
+    preview = collector.preview(
+        lookback_sec=lookback,
+        max_records=args.max_records,
+    )
+    print("=" * 80)
+    print(f"STATEBISECT WINDOWS COLLECTOR PREVIEW (v{preview['collector_version']})")
+    print("=" * 80)
+    print("READ-ONLY GUARANTEE   : Read-only access only. Zero host modifications.")
+    print(f"Host Platform         : {preview['os_platform']}")
+    print(f"Intended Lookback     : {lookback}s")
+    print(f"Record Limit / Source : {args.max_records}")
+    print(f"Total Sources         : {preview['sources_count']}")
+    print("-" * 80)
+    print(f"{'Source ID':<20} {'Category':<12} {'Perms Required':<16} {'Description'}")
+    print("-" * 80)
+    for src in preview["sources"]:
+        print(
+            f"{src['source_id']:<20} {src['category']:<12} {src['permission_requirement']:<16} {src['description'][:30]}"
+        )
+    print("=" * 80)
+    print("Note: All sources are read-only. No host modifications will occur during collection.")
+    return 0
+
+
+def cmd_collect_windows(args: argparse.Namespace) -> int:
+    """Execute opt-in read-only collection on Windows host and persist snapshot."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        collector = WindowsCollector()
+        lookback = args.lookback_minutes * 60 if getattr(args, "lookback_minutes", None) is not None else args.lookback_sec
+
+        print(f"Starting read-only Windows collection (lookback={lookback}s, max_records={args.max_records})...")
+        run = collector.collect(
+            lookback_sec=lookback,
+            max_records_per_source=args.max_records,
+        )
+
+        storage.save_collection_run(run)
+
+        print("\n" + "=" * 80)
+        print("COLLECTION RUN SUMMARY")
+        print("=" * 80)
+        print(f"Run ID            : {run.run_id}")
+        print(f"Status            : {run.status}")
+        print(f"OS Platform       : {run.os_platform}")
+        print(f"Machine ID        : {run.machine_id}")
+        print(f"Duration          : {run.duration_ms:.2f} ms")
+        print(f"Total Records     : {len(run.records)}")
+        print(f"Coverage Gaps     : {len(run.coverage_gaps)}")
+        print("-" * 80)
+        print(f"{'Source ID':<20} {'Category':<12} {'Status':<10} {'Records':<8} {'Gaps':<6} {'Notes'}")
+        print("-" * 80)
+        for s_id, s_info in run.summary.get("sources", {}).items():
+            print(
+                f"{s_id:<20} {s_info['category']:<12} {s_info['status']:<10} {s_info['record_count']:<8} {s_info['gap_count']:<6} {s_info['notes'][:20]}"
+            )
+        if run.coverage_gaps:
+            print("-" * 80)
+            print("COVERAGE GAPS OBSERVED:")
+            for g in run.coverage_gaps:
+                print(f"  [{g.category}] {g.source_id}: {g.reason}")
+        print("=" * 80)
+        print("Notice: Collected records are stored locally for correlation and diagnosis.")
+        return 0
+
+    except Exception as err:
+        print(f"Collection Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_list_collections(args: argparse.Namespace) -> int:
+    """List historical snapshot collection runs."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        runs = storage.list_collection_runs()
+        if not runs:
+            print("No collection runs found in database.")
+            return 0
+
+        print(f"Found {len(runs)} collection runs:\n")
+        print(f"{'Run ID':<22} {'Created At':<26} {'Status':<10} {'Records':<8} {'Gaps'}")
+        print("-" * 75)
+        for r in runs:
+            rec_count = r.summary.get("total_records", len(r.records))
+            gap_count = r.summary.get("total_gaps", len(r.coverage_gaps))
+            print(f"{r.run_id:<22} {r.created_at:<26} {r.status:<10} {rec_count:<8} {gap_count}")
+        return 0
+    except Exception as err:
+        print(f"Error listing collections: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_inspect_collection(args: argparse.Namespace) -> int:
+    """Inspect a collection run by ID."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        run = storage.get_collection_run(args.id)
+        if not run:
+            print(f"Error: Collection run '{args.id}' not found.", file=sys.stderr)
+            return 1
+
+        if args.format == "json":
+            out_obj = {
+                "run_id": run.run_id,
+                "created_at": run.created_at,
+                "finished_at": run.finished_at,
+                "collector_version": run.collector_version,
+                "os_platform": run.os_platform,
+                "machine_id": run.machine_id,
+                "status": run.status,
+                "duration_ms": run.duration_ms,
+                "summary": run.summary,
+                "total_records": len(run.records),
+                "total_gaps": len(run.coverage_gaps),
+                "records_sample": [
+                    {
+                        "category": r.category,
+                        "object_key": r.object_key,
+                        "data": r.data,
+                    }
+                    for r in run.records[:10]
+                ],
+                "coverage_gaps": [
+                    {
+                        "source_id": g.source_id,
+                        "category": g.category,
+                        "reason": g.reason,
+                        "impact": g.impact,
+                    }
+                    for g in run.coverage_gaps
+                ],
+            }
+            print(json.dumps(out_obj, indent=2))
+            return 0
+
+        print("=" * 80)
+        print(f"COLLECTION RUN: {run.run_id}")
+        print("=" * 80)
+        print(f"Timestamp       : {run.created_at}")
+        print(f"Status          : {run.status}")
+        print(f"OS Platform     : {run.os_platform}")
+        print(f"Machine ID      : {run.machine_id}")
+        print(f"Total Records   : {len(run.records)}")
+        print(f"Coverage Gaps   : {len(run.coverage_gaps)}")
+        print("-" * 80)
+        print("RECORDS SUMMARY BY CATEGORY:")
+        cat_counts: dict[str, int] = {}
+        for r in run.records:
+            cat_counts[r.category] = cat_counts.get(r.category, 0) + 1
+        for cat, cnt in sorted(cat_counts.items()):
+            print(f"  {cat:<18}: {cnt} items")
+        if run.coverage_gaps:
+            print("-" * 80)
+            print("COVERAGE GAPS:")
+            for g in run.coverage_gaps:
+                print(f"  [{g.category}] {g.source_id}: {g.reason}")
+        print("=" * 80)
+        return 0
+
+    except Exception as err:
+        print(f"Inspection Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_compare_snapshots(args: argparse.Namespace) -> int:
+    """Compare two collection runs and output normalized configuration diffs."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        before_run = storage.get_collection_run(args.before_id)
+        if not before_run:
+            print(f"Error: Baseline collection '{args.before_id}' not found.", file=sys.stderr)
+            return 1
+        after_run = storage.get_collection_run(args.after_id)
+        if not after_run:
+            print(f"Error: Target collection '{args.after_id}' not found.", file=sys.stderr)
+            return 1
+
+        diffs = compare_snapshots(before_run, after_run)
+        storage.save_snapshot_diffs(diffs)
+
+        if args.format == "json":
+            out_obj = {
+                "before_run_id": before_run.run_id,
+                "after_run_id": after_run.run_id,
+                "total_differences": len(diffs),
+                "differences": [
+                    {
+                        "category": d.category,
+                        "object_key": d.object_key,
+                        "change_type": d.change_type.value,
+                        "status": d.status,
+                        "notes": d.notes,
+                        "before_data": d.before_data,
+                        "after_data": d.after_data,
+                    }
+                    for d in diffs
+                ],
+            }
+            print(json.dumps(out_obj, indent=2))
+            return 0
+
+        print("=" * 80)
+        print("SNAPSHOT COMPARISON MATRIX")
+        print("=" * 80)
+        print(f"Before Run  : {before_run.run_id} ({before_run.created_at})")
+        print(f"After Run   : {after_run.run_id} ({after_run.created_at})")
+        print(f"Total Diffs : {len(diffs)}")
+        print("-" * 80)
+        if not diffs:
+            print("No differences observed between snapshots.")
+        else:
+            print(f"{'Category':<14} {'Change Type':<12} {'Object Key':<35} {'Notes'}")
+            print("-" * 80)
+            for d in diffs:
+                print(f"{d.category:<14} {d.change_type.value:<12} {d.object_key[:34]:<35} {d.notes[:16]}")
+        print("=" * 80)
+        print("Warning: Observed configuration differences are correlations, not proven causes.")
+        print("Controlled experiments and verification are required to establish causation.")
+        return 0
+
+    except Exception as err:
+        print(f"Comparison Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -326,6 +586,40 @@ def build_parser() -> argparse.ArgumentParser:
     p_exp.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_exp.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # collect-preview
+    p_prev = subparsers.add_parser("collect-preview", help="Preview read-only collection sources and limits.")
+    p_prev.add_argument("--lookback-sec", type=int, default=3600, help="Intended lookback window in seconds (default: 3600).")
+    p_prev.add_argument("--lookback-minutes", type=int, default=None, help="Intended lookback window in minutes.")
+    p_prev.add_argument("--max-records", type=int, default=100, help="Intended record limit per source (default: 100).")
+
+    # collect-windows
+    p_col = subparsers.add_parser("collect-windows", help="Run read-only Windows collection and save snapshot.")
+    p_col.add_argument("--lookback-sec", type=int, default=3600, help="Lookback window in seconds (default: 3600).")
+    p_col.add_argument("--lookback-minutes", type=int, default=None, help="Lookback window in minutes.")
+    p_col.add_argument("--max-records", type=int, default=100, help="Record limit per source (default: 100).")
+    p_col.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_col.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # list-collections
+    p_lcol = subparsers.add_parser("list-collections", help="List saved snapshot collection runs.")
+    p_lcol.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_lcol.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # inspect-collection
+    p_icol = subparsers.add_parser("inspect-collection", help="Inspect a collection run and its records.")
+    p_icol.add_argument("id", help="Collection run ID to inspect.")
+    p_icol.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_icol.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_icol.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # compare-snapshots
+    p_comp = subparsers.add_parser("compare-snapshots", help="Compare two collection snapshots.")
+    p_comp.add_argument("before_id", help="Baseline collection run ID.")
+    p_comp.add_argument("after_id", help="Target collection run ID.")
+    p_comp.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_comp.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_comp.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -347,6 +641,16 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_inspect_investigation(args)
     elif args.command == "export-report":
         return cmd_export_report(args)
+    elif args.command == "collect-preview":
+        return cmd_collect_preview(args)
+    elif args.command == "collect-windows":
+        return cmd_collect_windows(args)
+    elif args.command == "list-collections":
+        return cmd_list_collections(args)
+    elif args.command == "inspect-collection":
+        return cmd_inspect_collection(args)
+    elif args.command == "compare-snapshots":
+        return cmd_compare_snapshots(args)
     else:
         parser.print_help()
         return 2
