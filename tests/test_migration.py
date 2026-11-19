@@ -25,7 +25,7 @@ class TestDatabaseMigrations(unittest.TestCase):
     def test_fresh_schema_initialization(self):
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 7)
+            self.assertEqual(storage.get_current_schema_version(), 8)
 
             # Check that all tables exist
             cursor = storage._conn.execute(
@@ -49,6 +49,8 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertIn("registered_environments", tables)
             self.assertIn("registered_baselines", tables)
             self.assertIn("isolated_trials", tables)
+            self.assertIn("verification_runs", tables)
+            self.assertIn("verification_trials", tables)
         finally:
             storage.close()
 
@@ -91,10 +93,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with StateBisect Storage (migrating to v7)
+        # 2. Open with StateBisect Storage (migrating to v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 7)
+            self.assertEqual(storage.get_current_schema_version(), 8)
 
             # 3. Verify existing legacy data is preserved intact
             inv = storage.get_investigation("phase1-inv")
@@ -180,10 +182,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with Storage (applies v4, v5, v6, v7)
+        # 2. Open with Storage (applies v4, v5, v6, v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 7)
+            self.assertEqual(storage.get_current_schema_version(), 8)
             # Verify Phase 3 evidence preserved
             cursor = storage._conn.execute(
                 "SELECT status FROM health_check_evidence WHERE trial_id = 't-1'"
@@ -234,10 +236,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with Storage (applies v5, v6, v7)
+        # 2. Open with Storage (applies v5, v6, v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 7)
+            self.assertEqual(storage.get_current_schema_version(), 8)
             # Verify Phase 4 run preserved
             runs = storage.list_collection_runs()
             self.assertEqual(len(runs), 1)
@@ -286,10 +288,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with Storage (applies v6, v7)
+        # 2. Open with Storage (applies v6, v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 7)
+            self.assertEqual(storage.get_current_schema_version(), 8)
             inv = storage.get_investigation("inv-p5")
             self.assertIsNotNone(inv)
             self.assertEqual(inv.symptom, "Test v5 symptom")
@@ -344,10 +346,10 @@ class TestDatabaseMigrations(unittest.TestCase):
             )
         conn.close()
 
-        # 2. Open with Storage (applies v7)
+        # 2. Open with Storage (applies v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 7)
+            self.assertEqual(storage.get_current_schema_version(), 8)
 
             # Verify tables exist
             cursor = storage._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -355,6 +357,8 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertIn("registered_environments", tables)
             self.assertIn("registered_baselines", tables)
             self.assertIn("isolated_trials", tables)
+            self.assertIn("verification_runs", tables)
+            self.assertIn("verification_trials", tables)
 
             # Verify storage operations
             from statebisect.adapters.models import (
@@ -391,12 +395,88 @@ class TestDatabaseMigrations(unittest.TestCase):
         finally:
             storage.close()
 
+    def test_migrate_phase7_to_phase8_verification_tables(self):
+        # 1. Setup schema up to v7
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    description TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations VALUES (7, datetime('now'), 'v7');
+                CREATE TABLE investigations (id TEXT PRIMARY KEY, symptom TEXT, target_system TEXT, status TEXT, baseline_id TEXT, created_at TEXT, updated_at TEXT);
+                INSERT INTO investigations VALUES ('inv-8', 'Sym', 'Target', 'NEW', 'b-1', '2026-11-17T00:00:00Z', '2026-11-17T00:00:00Z');
+                """
+            )
+        conn.close()
+
+        # 2. Open with Storage (applies v8)
+        storage = Storage(self.db_path)
+        try:
+            self.assertEqual(storage.get_current_schema_version(), 8)
+            cursor = storage._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = {r[0] for r in cursor.fetchall()}
+            self.assertIn("verification_runs", tables)
+            self.assertIn("verification_trials", tables)
+
+            from statebisect.verification.models import (
+                VerificationRunRecord,
+                VerificationTrialRecord,
+                VerificationVerdict,
+                TrialRole,
+                VerificationNecessityDetail,
+            )
+            from statebisect.models import HealthCheckOutcome
+
+            run_rec = VerificationRunRecord(
+                verification_id="verif-test-1",
+                investigation_id="inv-8",
+                environment_id="sim-env-default",
+                baseline_id="b-1",
+                verdict=VerificationVerdict.VERIFIED_SET,
+                candidate_ids=["c1"],
+                is_1_minimal=True,
+                baseline_control_passed=True,
+                candidate_set_reproduced=True,
+                necessity_details=[
+                    VerificationNecessityDetail(
+                        change_id="c1",
+                        is_necessary=True,
+                        outcome_without_change=HealthCheckOutcome.PASS,
+                        explanation="Omitting restored PASS",
+                    )
+                ],
+                confidence_rationale="Empirically verified",
+            )
+            trial_rec = VerificationTrialRecord(
+                trial_id="tr-v1",
+                verification_id="verif-test-1",
+                trial_role=TrialRole.CANDIDATE_SET,
+                target_change_ids=["c1"],
+                outcome=HealthCheckOutcome.FAIL,
+            )
+            run_rec.trials.append(trial_rec)
+
+            storage.save_verification_run(run_rec)
+            fetched = storage.get_verification_run("verif-test-1")
+            self.assertIsNotNone(fetched)
+            self.assertEqual(fetched.verdict, VerificationVerdict.VERIFIED_SET)
+            self.assertEqual(len(fetched.trials), 1)
+            self.assertEqual(fetched.trials[0].trial_role, TrialRole.CANDIDATE_SET)
+            self.assertEqual(len(fetched.necessity_details), 1)
+            self.assertTrue(fetched.necessity_details[0].is_necessary)
+        finally:
+            storage.close()
+
     def test_migrations_are_repeat_safe(self):
         storage = Storage(self.db_path)
         try:
             storage._apply_migrations()
             storage._apply_migrations()
-            self.assertEqual(storage.get_current_schema_version(), 7)
+            self.assertEqual(storage.get_current_schema_version(), 8)
         finally:
             storage.close()
 

@@ -90,6 +90,22 @@ class FakeAdapter(BaseEnvironmentAdapter):
         self._environments[env_rec.environment_id] = env_rec
         self._baselines.setdefault(env_rec.environment_id, {})[base_rec.baseline_id] = base_rec
 
+    def register_baseline(
+        self, environment_id: str, baseline_id: str, display_name: str = ""
+    ) -> None:
+        """Register an additional baseline for an environment."""
+        base_rec = BaselineRecord(
+            baseline_id=baseline_id,
+            environment_id=environment_id,
+            display_name=display_name or f"Baseline {baseline_id}",
+            is_verified=True,
+            checksum_or_state="mock-checksum",
+        )
+        self._baselines.setdefault(environment_id, {})[baseline_id] = base_rec
+        env = self._environments.get(environment_id)
+        if env and baseline_id not in env.baseline_ids:
+            env.baseline_ids.append(baseline_id)
+
     def is_available(self) -> bool:
         return True
 
@@ -116,6 +132,8 @@ class FakeAdapter(BaseEnvironmentAdapter):
                 error_reason="Injected baseline restore failure in FakeAdapter.",
             )
         self.applied_changes.clear()
+        if hasattr(self, "restore_hook") and self.restore_hook is not None:
+            self.restore_hook(environment_id, baseline_id)
         env = self._environments.get(environment_id)
         if env:
             env.status = EnvironmentStatus.VERIFIED
@@ -171,6 +189,15 @@ class FakeAdapter(BaseEnvironmentAdapter):
         self, environment_id: str, check_id: str, parameters: dict[str, Any]
     ) -> HealthCheckResult:
         self.call_history.append(("run_health_check", (environment_id, check_id, parameters)))
+        if hasattr(self, "custom_check_callback") and self.custom_check_callback is not None:
+            res = self.custom_check_callback(self.applied_changes)
+            if isinstance(res, tuple):
+                return HealthCheckResult(outcome=res[0], output=res[1])
+            elif isinstance(res, HealthCheckResult):
+                return res
+            elif isinstance(res, HealthCheckOutcome):
+                return HealthCheckResult(outcome=res, output="")
+
         if self.fail_health_check:
             return HealthCheckResult(
                 outcome=HealthCheckOutcome.FAIL,

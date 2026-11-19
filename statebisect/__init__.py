@@ -96,6 +96,17 @@ from .scenarios import (
     load_scenario_file,
     validate_and_parse_scenario,
 )
+from .verification import (
+    TrialRole,
+    VerificationEngine,
+    VerificationNecessityDetail,
+    VerificationProtocolConfig,
+    VerificationRunRecord,
+    VerificationTrialRecord,
+    VerificationVerdict,
+    format_verification_json,
+    format_verification_text,
+)
 
 __version__ = ENGINE_VERSION
 __all__ = [
@@ -168,6 +179,13 @@ __all__ = [
     "SUPPORTED_CHECK_TYPES",
     "SUPPORTED_CHECK_VERSIONS",
     "TrialLifecycleState",
+    "TrialRole",
+    "VerificationEngine",
+    "VerificationNecessityDetail",
+    "VerificationProtocolConfig",
+    "VerificationRunRecord",
+    "VerificationTrialRecord",
+    "VerificationVerdict",
     "WindowsCollector",
     "WindowsSandboxEvaluation",
     "bound_evidence",
@@ -176,6 +194,8 @@ __all__ = [
     "create_health_check",
     "create_key_value_health_check",
     "execute_scenario",
+    "format_verification_json",
+    "format_verification_text",
     "generate_json_report",
     "generate_text_report",
     "load_scenario_file",

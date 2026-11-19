@@ -47,6 +47,14 @@ from .adapters import (
     TrialLifecycleState,
     WindowsSandboxEvaluation,
 )
+from .verification import (
+    VerificationEngine,
+    VerificationProtocolConfig,
+    VerificationRunRecord,
+    VerificationVerdict,
+    format_verification_json,
+    format_verification_text,
+)
 from .correlation.engine import parse_iso_or_user_time
 from .delta_debugging import DeltaDebugger
 from .models import (
@@ -1767,6 +1775,244 @@ def cmd_run_minimization(args: argparse.Namespace) -> int:
             storage.close()
 
 
+# ============================================================================
+# Phase 8: Verification, Reproduction, and Differential Validation Commands
+# ============================================================================
+
+def cmd_preview_verification(args: argparse.Namespace) -> int:
+    """Preview the verification protocol, trial estimate, and planned checks."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        inv = storage.get_investigation(args.investigation)
+        if not inv:
+            print(f"Error: Investigation '{args.investigation}' not found in storage.", file=sys.stderr)
+            return 1
+
+        candidates = storage.get_candidates(args.investigation, active_only=True)
+        if getattr(args, "candidates", None):
+            selected_ids = {c.strip() for c in args.candidates.split(",") if c.strip()}
+            candidates = [c for c in candidates if c.candidate_id in selected_ids]
+
+        changes: list[Change] = []
+        for c in candidates:
+            changes.append(
+                Change(
+                    id=c.candidate_id,
+                    category=c.category,
+                    description=c.description or c.display_name,
+                    payload={"key": c.object_key, "value": c.after_value or "changed"},
+                )
+            )
+
+        diff_baselines = [b.strip() for b in args.differential_baselines.split(",") if b.strip()] if getattr(args, "differential_baselines", None) else []
+        config = VerificationProtocolConfig(
+            repeat_count=getattr(args, "repeats", 1),
+            enable_reversal=getattr(args, "enable_reversal", False),
+            differential_baseline_ids=diff_baselines,
+        )
+
+        registry = AdapterRegistry.get_default()
+        adapter = registry.get_adapter(getattr(args, "adapter", "simulation")) or registry.get_default_adapter()
+        runner = IsolatedTrialRunner(
+            adapter=adapter,
+            environment_id=args.environment,
+            baseline_id=args.baseline,
+            storage=storage,
+            investigation_id=args.investigation,
+        )
+
+        engine = VerificationEngine(
+            runner=runner,
+            candidate_changes=changes,
+            config=config,
+        )
+        preview_data = engine.preview()
+
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps(preview_data, indent=2))
+            return 0
+
+        print("=" * 80)
+        print("STATEBISECT VERIFICATION PROTOCOL PREVIEW")
+        print("=" * 80)
+        print(f"Investigation ID          : {args.investigation}")
+        print(f"Environment ID            : {preview_data['environment_id']}")
+        print(f"Primary Baseline ID       : {preview_data['primary_baseline_id']}")
+        print(f"Differential Baselines    : {preview_data['differential_baseline_ids']}")
+        print(f"Candidate Changes ({preview_data['candidate_count']})   : {preview_data['candidate_change_ids']}")
+        print(f"Repeat Policy             : {preview_data['repeat_count']} repeat(s) per trial stage")
+        print(f"Reversal Check Enabled?   : {preview_data['enable_reversal']}")
+        print("-" * 80)
+        print("ESTIMATED TRIAL MATRIX:")
+        for role, count in preview_data["estimated_trials"].items():
+            print(f"  * {role:<25}: {count} trial(s)")
+        print("=" * 80)
+        print("Note: Preview only. No isolated environments or baselines were modified.")
+        return 0
+    except Exception as err:
+        print(f"Preview Verification Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_run_verification(args: argparse.Namespace) -> int:
+    """Execute the verification protocol against isolated baselines."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        inv = storage.get_investigation(args.investigation)
+        if not inv:
+            print(f"Error: Investigation '{args.investigation}' not found in storage.", file=sys.stderr)
+            return 1
+
+        candidates = storage.get_candidates(args.investigation, active_only=True)
+        if getattr(args, "candidates", None):
+            selected_ids = {c.strip() for c in args.candidates.split(",") if c.strip()}
+            candidates = [c for c in candidates if c.candidate_id in selected_ids]
+
+        changes: list[Change] = []
+        for c in candidates:
+            changes.append(
+                Change(
+                    id=c.candidate_id,
+                    category=c.category,
+                    description=c.description or c.display_name,
+                    payload={"key": c.object_key, "value": c.after_value or "changed"},
+                )
+            )
+
+        diff_baselines = [b.strip() for b in args.differential_baselines.split(",") if b.strip()] if getattr(args, "differential_baselines", None) else []
+        config = VerificationProtocolConfig(
+            repeat_count=getattr(args, "repeats", 1),
+            enable_reversal=getattr(args, "enable_reversal", False),
+            differential_baseline_ids=diff_baselines,
+        )
+
+        registry = AdapterRegistry.get_default()
+        adapter = registry.get_adapter(args.adapter)
+        if not adapter:
+            print(f"Error: Adapter '{args.adapter}' is not available.", file=sys.stderr)
+            return 1
+
+        # Auto-register default simulation environment and baseline if needed
+        if args.environment == "sim-env-default":
+            if not storage.get_environment("sim-env-default"):
+                storage.register_environment(
+                    EnvironmentRecord(
+                        environment_id="sim-env-default",
+                        adapter_type=AdapterType.SIMULATION,
+                        display_name="Default Simulation Workspace",
+                        is_disposable=True,
+                        is_host=False,
+                        status=EnvironmentStatus.REGISTERED,
+                    )
+                )
+                storage.register_baseline(
+                    BaselineRecord(
+                        baseline_id="baseline-001",
+                        environment_id="sim-env-default",
+                        display_name="Default Clean Baseline",
+                        checksum_or_state="sim-initial-clean",
+                    )
+                )
+
+        runner = IsolatedTrialRunner(
+            adapter=adapter,
+            environment_id=args.environment,
+            baseline_id=args.baseline,
+            storage=storage,
+            investigation_id=args.investigation,
+        )
+
+        engine = VerificationEngine(
+            runner=runner,
+            candidate_changes=changes,
+            config=config,
+        )
+
+        rec = engine.verify()
+
+        # If verified, update investigation status
+        if rec.verdict in (VerificationVerdict.VERIFIED_SET, VerificationVerdict.VERIFIED_INTERACTION):
+            storage.update_investigation_status(args.investigation, InvestigationStatus.VERIFIED)
+
+        if getattr(args, "format", "text") == "json":
+            print(format_verification_json(rec))
+        else:
+            print(format_verification_text(rec))
+
+        return 0
+    except Exception as err:
+        print(f"Run Verification Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_inspect_verification(args: argparse.Namespace) -> int:
+    """Inspect a saved verification run record."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        rec = storage.get_verification_run(args.verification_id)
+        if not rec:
+            print(f"Error: Verification run '{args.verification_id}' not found in storage.", file=sys.stderr)
+            return 1
+
+        if getattr(args, "format", "text") == "json":
+            print(format_verification_json(rec))
+        else:
+            print(format_verification_text(rec))
+        return 0
+    except Exception as err:
+        print(f"Inspect Verification Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_export_verification(args: argparse.Namespace) -> int:
+    """Export a verification report to stdout or file."""
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        rec = storage.get_verification_run(args.verification_id)
+        if not rec:
+            print(f"Error: Verification run '{args.verification_id}' not found in storage.", file=sys.stderr)
+            return 1
+
+        fmt = getattr(args, "format", "text")
+        content = format_verification_json(rec) if fmt == "json" else format_verification_text(rec)
+
+        if args.output:
+            out_p = Path(args.output).resolve()
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.write_text(content, encoding="utf-8")
+            print(f"Exported verification report to: {out_p}")
+        else:
+            print(content)
+        return 0
+    except Exception as err:
+        print(f"Export Verification Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -1989,6 +2235,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_rmin.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_rmin.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # preview-verification
+    p_pverif = subparsers.add_parser("preview-verification", help="Preview planned verification protocol and trial matrix.")
+    p_pverif.add_argument("investigation", help="Investigation ID to verify.")
+    p_pverif.add_argument("--environment", default="sim-env-default", help="Environment ID (default: sim-env-default).")
+    p_pverif.add_argument("--baseline", default="baseline-001", help="Primary baseline ID (default: baseline-001).")
+    p_pverif.add_argument("--adapter", choices=["simulation", "hyperv", "fake"], default="simulation", help="Adapter type.")
+    p_pverif.add_argument("--candidates", default="", help="Comma-separated candidate IDs to test (default: all active).")
+    p_pverif.add_argument("--repeats", type=int, default=1, help="Repetitions per stage (1 to 5).")
+    p_pverif.add_argument("--enable-reversal", action="store_true", help="Include safe reversal validation.")
+    p_pverif.add_argument("--differential-baselines", default="", help="Comma-separated secondary baseline IDs to test.")
+    p_pverif.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_pverif.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_pverif.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # run-verification
+    p_rverif = subparsers.add_parser("run-verification", help="Execute the deterministic verification protocol against isolated baselines.")
+    p_rverif.add_argument("investigation", help="Investigation ID containing candidates to verify.")
+    p_rverif.add_argument("--environment", default="sim-env-default", help="Environment ID (default: sim-env-default).")
+    p_rverif.add_argument("--baseline", default="baseline-001", help="Primary baseline ID (default: baseline-001).")
+    p_rverif.add_argument("--adapter", choices=["simulation", "hyperv", "fake"], default="simulation", help="Adapter type.")
+    p_rverif.add_argument("--candidates", default="", help="Comma-separated candidate IDs to test (default: all active).")
+    p_rverif.add_argument("--repeats", type=int, default=1, help="Repetitions per stage (1 to 5).")
+    p_rverif.add_argument("--enable-reversal", action="store_true", help="Include safe reversal validation.")
+    p_rverif.add_argument("--differential-baselines", default="", help="Comma-separated secondary baseline IDs to test.")
+    p_rverif.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_rverif.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_rverif.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # inspect-verification
+    p_iverif = subparsers.add_parser("inspect-verification", help="Inspect a saved verification run and full trial matrix.")
+    p_iverif.add_argument("verification_id", help="Verification run ID to inspect.")
+    p_iverif.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_iverif.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_iverif.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # export-verification
+    p_everif = subparsers.add_parser("export-verification", help="Export an evidence-backed verification report to file or stdout.")
+    p_everif.add_argument("verification_id", help="Verification run ID to export.")
+    p_everif.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_everif.add_argument("-o", "--output", default=None, help="File path to save the verification report.")
+    p_everif.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_everif.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -2056,6 +2345,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run_trial(args)
     elif args.command == "run-minimization":
         return cmd_run_minimization(args)
+    elif args.command == "preview-verification":
+        return cmd_preview_verification(args)
+    elif args.command == "run-verification":
+        return cmd_run_verification(args)
+    elif args.command == "inspect-verification":
+        return cmd_inspect_verification(args)
+    elif args.command == "export-verification":
+        return cmd_export_verification(args)
     else:
         parser.print_help()
         return 2

@@ -41,6 +41,13 @@ from .adapters.models import (
     IsolatedTrialRecord,
     TrialLifecycleState,
 )
+from .verification.models import (
+    TrialRole,
+    VerificationNecessityDetail,
+    VerificationRunRecord,
+    VerificationTrialRecord,
+    VerificationVerdict,
+)
 from .monitor.models import (
     EventConfidence,
     MonitoringCoverageGap,
@@ -50,7 +57,7 @@ from .monitor.models import (
     ProcessProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 7
+LATEST_SCHEMA_VERSION = 8
 
 
 class Storage:
@@ -539,6 +546,64 @@ class Storage:
                     """
                 )
                 current_ver = 7
+
+            # Migration 8: Phase 8 Verification Runs, Necessity Tracking, and Trial Matrix
+            if current_ver < 8:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS verification_runs (
+                        verification_id TEXT PRIMARY KEY,
+                        investigation_id TEXT NOT NULL,
+                        environment_id TEXT NOT NULL,
+                        baseline_id TEXT NOT NULL,
+                        verdict TEXT NOT NULL,
+                        protocol_version TEXT NOT NULL,
+                        candidate_ids_json TEXT NOT NULL,
+                        is_1_minimal INTEGER NOT NULL,
+                        is_interaction INTEGER NOT NULL,
+                        baseline_control_passed INTEGER NOT NULL,
+                        candidate_set_reproduced INTEGER NOT NULL,
+                        reversal_tested INTEGER NOT NULL,
+                        reversal_passed INTEGER,
+                        necessity_json TEXT NOT NULL,
+                        differential_json TEXT NOT NULL,
+                        rationale TEXT NOT NULL,
+                        limitations_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT NOT NULL,
+                        FOREIGN KEY (investigation_id) REFERENCES investigations(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_verification_runs_inv 
+                    ON verification_runs(investigation_id);
+
+                    CREATE TABLE IF NOT EXISTS verification_trials (
+                        trial_id TEXT PRIMARY KEY,
+                        verification_id TEXT NOT NULL,
+                        trial_role TEXT NOT NULL,
+                        target_changes_json TEXT NOT NULL,
+                        omitted_change_id TEXT,
+                        attempt_number INTEGER NOT NULL,
+                        environment_id TEXT NOT NULL,
+                        baseline_id TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        lifecycle_state TEXT NOT NULL,
+                        restore_status TEXT NOT NULL,
+                        cleanup_status TEXT NOT NULL,
+                        output_bounded TEXT NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        FOREIGN KEY (verification_id) REFERENCES verification_runs(verification_id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_verification_trials_verif 
+                    ON verification_trials(verification_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (8, datetime('now'), 'Add Phase 8 verification runs, necessity tracking, and trial matrix');
+                    """
+                )
+                current_ver = 8
 
     def log_audit(
         self,
@@ -1688,4 +1753,163 @@ class Storage:
             cleanup_status=row["cleanup_status"],
             error_reason=row["error_reason"],
             evidence_data=json.loads(row["evidence_json"]) if row["evidence_json"] else {},
+        )
+
+    def save_verification_run(self, record: VerificationRunRecord) -> None:
+        """Persist a complete verification run record and all associated trial records."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO verification_runs (
+                    verification_id, investigation_id, environment_id, baseline_id,
+                    verdict, protocol_version, candidate_ids_json, is_1_minimal,
+                    is_interaction, baseline_control_passed, candidate_set_reproduced,
+                    reversal_tested, reversal_passed, necessity_json, differential_json,
+                    rationale, limitations_json, created_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.verification_id,
+                    record.investigation_id,
+                    record.environment_id,
+                    record.baseline_id,
+                    record.verdict.value,
+                    record.protocol_version,
+                    json.dumps(record.candidate_ids),
+                    1 if record.is_1_minimal else 0,
+                    1 if record.is_interaction else 0,
+                    1 if record.baseline_control_passed else 0,
+                    1 if record.candidate_set_reproduced else 0,
+                    1 if record.reversal_tested else 0,
+                    None if record.reversal_passed is None else (1 if record.reversal_passed else 0),
+                    json.dumps([n.to_dict() for n in record.necessity_details]),
+                    json.dumps(record.differential_results),
+                    record.confidence_rationale,
+                    json.dumps(record.limitations),
+                    record.created_at,
+                    record.finished_at,
+                ),
+            )
+
+            for trial in record.trials:
+                self._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO verification_trials (
+                        trial_id, verification_id, trial_role, target_changes_json,
+                        omitted_change_id, attempt_number, environment_id, baseline_id,
+                        outcome, lifecycle_state, restore_status, cleanup_status,
+                        output_bounded, duration_ms, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        trial.trial_id,
+                        record.verification_id,
+                        trial.trial_role.value,
+                        json.dumps(trial.target_change_ids),
+                        trial.omitted_change_id,
+                        trial.attempt_number,
+                        trial.environment_id,
+                        trial.baseline_id,
+                        trial.outcome.value,
+                        trial.lifecycle_state,
+                        trial.restore_status,
+                        trial.cleanup_status,
+                        trial.output_bounded,
+                        trial.duration_ms,
+                        trial.timestamp,
+                    ),
+                )
+
+    def get_verification_run(self, verification_id: str) -> VerificationRunRecord | None:
+        """Retrieve a verification run record and all its associated trials."""
+        row = self._conn.execute(
+            "SELECT * FROM verification_runs WHERE verification_id = ?",
+            (verification_id,),
+        ).fetchone()
+        if not row:
+            return None
+
+        trial_rows = self._conn.execute(
+            "SELECT * FROM verification_trials WHERE verification_id = ? ORDER BY timestamp ASC",
+            (verification_id,),
+        ).fetchall()
+        trials = [self._row_to_verification_trial(r) for r in trial_rows]
+        return self._row_to_verification_run(row, trials)
+
+    def list_verification_runs(self, investigation_id: str | None = None) -> list[VerificationRunRecord]:
+        """List verification runs, optionally filtered by investigation ID."""
+        if investigation_id:
+            rows = self._conn.execute(
+                "SELECT * FROM verification_runs WHERE investigation_id = ? ORDER BY created_at DESC",
+                (investigation_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM verification_runs ORDER BY created_at DESC"
+            ).fetchall()
+
+        results = []
+        for r in rows:
+            trial_rows = self._conn.execute(
+                "SELECT * FROM verification_trials WHERE verification_id = ? ORDER BY timestamp ASC",
+                (r["verification_id"],),
+            ).fetchall()
+            trials = [self._row_to_verification_trial(tr) for tr in trial_rows]
+            results.append(self._row_to_verification_run(r, trials))
+        return results
+
+    def _row_to_verification_run(self, row: sqlite3.Row, trials: list[VerificationTrialRecord]) -> VerificationRunRecord:
+        raw_nec = json.loads(row["necessity_json"]) if row["necessity_json"] else []
+        necessity_details = [
+            VerificationNecessityDetail(
+                change_id=n["change_id"],
+                is_necessary=bool(n["is_necessary"]),
+                outcome_without_change=HealthCheckOutcome(n["outcome_without_change"]),
+                explanation=n["explanation"],
+            )
+            for n in raw_nec
+        ]
+        rev_passed_val = row["reversal_passed"]
+        reversal_passed = None if rev_passed_val is None else bool(rev_passed_val)
+
+        return VerificationRunRecord(
+            verification_id=row["verification_id"],
+            investigation_id=row["investigation_id"],
+            environment_id=row["environment_id"],
+            baseline_id=row["baseline_id"],
+            verdict=VerificationVerdict(row["verdict"]),
+            protocol_version=row["protocol_version"],
+            created_at=row["created_at"],
+            finished_at=row["finished_at"],
+            candidate_ids=json.loads(row["candidate_ids_json"]),
+            is_1_minimal=bool(row["is_1_minimal"]),
+            is_interaction=bool(row["is_interaction"]),
+            baseline_control_passed=bool(row["baseline_control_passed"]),
+            candidate_set_reproduced=bool(row["candidate_set_reproduced"]),
+            reversal_tested=bool(row["reversal_tested"]),
+            reversal_passed=reversal_passed,
+            necessity_details=necessity_details,
+            differential_results=json.loads(row["differential_json"]) if row["differential_json"] else {},
+            trials=trials,
+            confidence_rationale=row["rationale"],
+            limitations=json.loads(row["limitations_json"]) if row["limitations_json"] else [],
+        )
+
+    def _row_to_verification_trial(self, row: sqlite3.Row) -> VerificationTrialRecord:
+        return VerificationTrialRecord(
+            trial_id=row["trial_id"],
+            verification_id=row["verification_id"],
+            trial_role=TrialRole(row["trial_role"]),
+            target_change_ids=json.loads(row["target_changes_json"]),
+            omitted_change_id=row["omitted_change_id"],
+            attempt_number=row["attempt_number"],
+            environment_id=row["environment_id"],
+            baseline_id=row["baseline_id"],
+            outcome=HealthCheckOutcome(row["outcome"]),
+            lifecycle_state=row["lifecycle_state"],
+            restore_status=row["restore_status"],
+            cleanup_status=row["cleanup_status"],
+            output_bounded=row["output_bounded"],
+            duration_ms=row["duration_ms"],
+            timestamp=row["timestamp"],
         )

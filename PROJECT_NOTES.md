@@ -252,32 +252,69 @@
     - Updated `tests/test_cli.py` and `tests/test_migration.py`.
     - Total test suite: 119 tests across 13 modules, all passing.
 
+## Phase 8: Verification, Reproduction, Differential Validation, and Evidence-Backed Findings
+
+- **Date**: March 2026
+- **Status**: Complete
+- **Components Implemented**:
+  - `statebisect/verification/models.py`:
+    - `VerificationVerdict` enum: `VERIFIED_SET`, `VERIFIED_INTERACTION`, `PARTIALLY_SUPPORTED`, `NOT_REPRODUCED`, `INCONCLUSIVE`, `INVALID_BASELINE`, `ENVIRONMENT_CORRUPTED`, `CANCELLED`.
+    - `TrialRole` enum: `BASELINE_CONTROL`, `CANDIDATE_SET`, `NECESSITY_TEST`, `REVERSAL_CHECK`, `DIFFERENTIAL_BASELINE`.
+    - `VerificationProtocolConfig`: Configures repeats (1 to 5), per-trial timeout (default 30.0s), differential baseline, reversal action/hook, and cancellation token.
+    - Dataclasses: `VerificationTrialRecord`, `VerificationNecessityDetail`, `VerificationRunRecord`.
+  - `statebisect/verification/engine.py`:
+    - `VerificationEngine`: Executes dry-run `preview(...)` and the 6-stage protocol `verify(...)`.
+    - Stage 1: Baseline control check ($B_1$) - verifies baseline health before testing candidates.
+    - Stage 2: Candidate set reproduction with multi-attempt repetition consistency check ($k \in [1, 5]$).
+    - Stage 3: Member-by-member necessity checks ($S \setminus \{c\}$) classifying 1-minimality and interaction sets.
+    - Stage 4: Optional safe reversal check on modified state with mandatory `finally` baseline restoration.
+    - Stage 5: Optional differential baseline validation ($B_2$).
+    - Stage 6: Synthesis of evidence-backed findings and audit matrix.
+  - `statebisect/verification/reporting.py`:
+    - `format_verification_text`: Full human-readable diagnostic report with audit matrix, necessity analysis, differential comparison, rationale, and limitations.
+    - `format_verification_json`: Structured JSON serialization.
+  - `statebisect/storage.py`:
+    - Bumped schema to Version 8 (`schema_version = 8`).
+    - Added Migration 8: creates `verification_runs` and `verification_trials` tables with cascade deletion.
+    - Added methods: `save_verification_run`, `get_verification_run`, `list_verification_runs`.
+  - `statebisect/cli.py`:
+    - Added subcommands: `preview-verification`, `run-verification`, `inspect-verification`, `export-verification`.
+  - `tests/test_verification.py`:
+    - 14 comprehensive unit and integration tests covering: verdicts (`VERIFIED_SET`, `VERIFIED_INTERACTION`, `PARTIALLY_SUPPORTED`, `NOT_REPRODUCED`, `INVALID_BASELINE`, `INCONCLUSIVE`), dry-run preview, repetition consistency, safe reversal cleanup, differential baselines, text/JSON reporting, SQLite persistence/retrieval, and CLI commands.
+
 ## Technology & Algorithm Decisions & Source Verification
 
-1. **Standard Checkpoints vs. Production Checkpoints (Hyper-V)**:
+1. **Delta Debugging 1-Minimality and Necessity**:
+   - **Primary Source**: Zeller, A. "Yesterday, My Program Worked. Today, It Does Not. Why?" (ESEC/FSE 1999); Zeller, A. *Why Programs Fail: A Guide to Systematic Debugging* (2nd ed., Morgan Kaufmann).
+   - **Decision**: In Phase 8, candidate change verification extends raw minimization by testing each subset $S \setminus \{c\}$ against the isolated environment to determine whether each individual change $c$ is strictly necessary for symptom reproduction.
+   - **Distinction**:
+     - *1-Minimal Set*: A failure-inducing set where removing any single change causes the failure to disappear (all elements necessary).
+     - *Bystander*: A change present in $S$ whose removal still reproduces the failure ($S \setminus \{c\} \rightarrow \text{FAIL}$).
+     - *Interaction*: A multi-element 1-minimal set requiring all members concurrently.
+2. **Standard Checkpoints vs. Production Checkpoints (Hyper-V)**:
    - **Primary Source**: Microsoft Learn: "Choose between standard or production checkpoints in Hyper-V" (2023/2024).
    - **Decision**: StateBisect utilizes standard checkpoints (`Restore-VMSnapshot`) for isolation trials.
    - **Rationale**: Production checkpoints rely on VSS inside guest Windows to perform application-consistent backup, which does not capture complete in-memory machine state or exact point-in-time configuration differentials. Standard checkpoints capture the exact disk and memory state, enabling instantaneous and deterministic rollback to clean baselines.
-2. **Windows Sandbox Technical Deferral**:
+3. **Windows Sandbox Technical Deferral**:
    - **Primary Source**: Microsoft Learn: "Windows Sandbox architecture and configuration" (2024).
    - **Decision**: Formally evaluate and document Windows Sandbox capabilities, but defer live adapter execution in favor of disposable Hyper-V VMs.
    - **Rationale**: Windows Sandbox is architecturally stateless and ephemeral. It does not provide an API for in-place snapshotting or rollback. Each trial would require a cold boot of a new sandbox container taking 15–30 seconds, leading to unviable test times for Delta Debugging ($O(N)$ trials).
-3. **Mandatory Exception Handling in Cleanup (`finally` block)**:
+4. **Mandatory Exception Handling in Cleanup (`finally` block)**:
    - **Decision**: Adhere strictly to the rule prohibiting `return`, `break`, or `continue` inside `finally` blocks.
-   - **Safety Boundary**: Using `return` in a `finally` block suppresses any exception thrown in the `try` block. In `IsolatedTrialRunner`, any cleanup error is either logged or chained to the primary trial exception via `__context__`, ensuring no unexpected crash or contamination is swallowed.
-4. **Environment Corruption Isolation Invariant**:
+   - **Safety Boundary**: Using `return` in a `finally` block suppresses any exception thrown in the `try` block. In `IsolatedTrialRunner` and `VerificationEngine`, any cleanup error is either logged or chained to the primary trial exception via `__context__`, ensuring no unexpected crash or contamination is swallowed.
+5. **Environment Corruption Isolation Invariant**:
    - **Decision**: If an adapter fails to restore its baseline or cleanup a trial, its status is immediately transitioned to `ENVIRONMENT_CORRUPTED`.
    - **Safety Invariant**: All subsequent trials against that environment ID are refused immediately with an error. Contaminated environments are never reused for Delta Debugging experiments.
+6. **Differential Validation Across Baselines**:
+   - **Decision**: Provide optional differential baseline validation ($B_2$) to distinguish environment-portable configuration defects from defects dependent on specific base system images.
 
 ## Verification Results
-- All 119 unit and integration tests passing (`python -m unittest discover -s tests -v`).
+- All 136 unit and integration tests passing (`python -m unittest discover -s tests -v`).
 - Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
-- Phase 7 CLI workflow verified end-to-end (`list-adapters`, `sandbox-evaluation`, `list-environments`, `inspect-environment`, `verify-baseline`, `run-trial`, `run-minimization`).
-- Schema migrations from v1 through v7 verified with zero data loss.
+- Phase 8 CLI workflow verified end-to-end (`preview-verification`, `run-verification`, `inspect-verification`, `export-verification`).
+- Schema migrations from v1 through v8 verified with zero data loss.
 
-## Next Phase: Phase 8 — Verification, Reproduction, and Differential Validation
-- **Entry Criteria**: Phase 7 acceptance criteria met (safe isolated environment adapters, Simulation/Fake/Hyper-V implementations, Windows Sandbox documented evaluation, pre-trial and post-trial baseline verification, Schema Version 7 migrations, 119 tests passing).
+## Next Phase: Phase 9 — Investigation Dashboard & Visualization
+- **Entry Criteria**: Phase 8 acceptance criteria met (6-stage verification protocol, member-by-member necessity analysis, differential baseline testing, safe reversal checks, evidence-backed verdicts and audit matrices, Schema Version 8 migrations, 136 tests passing).
 - **Upcoming Deliverables**:
-  - Verification of minimal failure-inducing sets: confirming that candidate changes reproduce the symptom and removing any change restores health.
-  - Differential validation across alternative baselines.
-  - Distinction between necessary changes, sufficient changes, and correlated bystanders.
+  - Investigation Dashboard and visualization of configuration differences, candidate timelines, trial execution trees, and verification audit matrices.

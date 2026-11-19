@@ -1,7 +1,7 @@
 # StateBisect
 
-> **Notice: Isolated Experiment Adapter and Trial Runner**  
-> StateBisect is currently in a Phase 7 state. It features a safe, isolated experiment adapter and trial runner with deterministic baseline restoration and verification before every trial. **No modifications are made to the host Windows registry, files, services, or system configuration.** Automated tests execute exclusively against in-memory simulation and test doubles. Real Hyper-V VM experiments require explicit user registration of disposable virtual machines, enforce strict non-host validation, and fall back safely to `UNAVAILABLE` without elevation. Candidate ranking and trial execution are never represented as causal proof.
+> **Notice: Verification, Reproduction, Differential Validation, and Evidence-Backed Findings**  
+> StateBisect is currently in a Phase 8 state. It features a rigorous 6-stage verification protocol, member-by-member necessity analysis, differential baseline validation, safe reversal checks, and evidence-backed finding generation. **No modifications are made to the host Windows registry, files, services, or system configuration.** Automated tests execute exclusively against in-memory simulation and test doubles. Real Hyper-V VM experiments require explicit user registration of disposable virtual machines, enforce strict non-host validation, and fall back safely to `UNAVAILABLE` without elevation. All findings apply solely to the specific tested environments, baselines, and health checks—never represented as claims of universal causality or automatic repair.
 
 ## 1. Product Mission
 
@@ -70,6 +70,11 @@ statebisect/
 │   │   ├── sandbox_evaluator.py # Windows Sandbox technical evaluation & deferral rationale
 │   │   ├── registry.py      # Action & Adapter registries (with command-key rejection)
 │   │   └── runner.py        # IsolatedTrialRunner orchestrating baseline restore & verify
+│   ├── verification/        # Verification, necessity & differential validation (Phase 8)
+│   │   ├── __init__.py      # Verification exports
+│   │   ├── models.py        # Verdicts, roles, protocol configs, necessity details, run records
+│   │   ├── engine.py        # 6-stage VerificationEngine, dry-run preview, necessity analysis
+│   │   └── reporting.py     # Verification audit matrix and text/JSON formatters
 │   ├── health_checks/       # Pluggable, versioned health-check system
 │   │   ├── base.py          # BaseHealthCheck, evidence bounding, and secret redaction
 │   │   ├── simulated_state.py # State condition matcher (key-value and compound)
@@ -83,6 +88,7 @@ statebisect/
 │   ├── storage.py           # SQLite persistence layer with schema migrations & evidence store
 │   └── reporting.py         # Diagnostic text and JSON report generators
 ├── tests/
+│   ├── test_verification.py # Phase 8 verification protocol, necessity, reversal, and CLI tests
 │   ├── test_adapters.py     # Phase 7 adapter lifecycle, runner, and Hyper-V safety tests
 │   ├── test_correlation.py  # Phase 6 candidate generation, ranking, and audit tests
 │   ├── test_monitor.py      # Phase 5 monitoring engine, sources, and lifecycle tests
@@ -261,20 +267,62 @@ Isolated trials progress through 11 explicit lifecycle states:
 - **Dual-Exception Preservation**: Cleanups in `finally` blocks never contain `return`, `break`, or `continue`. If an error occurs during both trial execution and cleanup, both exceptions are preserved using Python's `__context__` exception chaining.
 - **Allowlisted Action Registry**: Only pre-registered, safe change actions can be applied. Actions specifying raw `command`, `shell`, or `powershell` keys or risk tiers above medium are strictly rejected.
 
-## 9. Persistence, Evidence Model & Migrations
+## 9. Verification, Reproduction & Differential Validation Engine (Phase 8)
+
+StateBisect provides a rigorous verification and differential validation engine that tests whether candidate changes isolated during investigation are genuinely failure-inducing, 1-minimal, reversible, and robust across baselines.
+
+### 6-Stage Verification Protocol:
+1. **Baseline Control Check**:
+   - Executes the failure health check against the clean primary baseline $B_1$ with no changes applied.
+   - If the baseline is unhealthy, the run immediately aborts with verdict `INVALID_BASELINE`. Never tests changes against an already-broken baseline.
+2. **Candidate Set Reproduction**:
+   - Applies the entire candidate set $S$ and evaluates health with configurable repeats ($k \in [1, 5]$).
+   - If all repeats pass, symptom reproduction failed: verdict `NOT_REPRODUCED`.
+   - If repeats disagree (intermittent/flaky symptom), marked `INCONCLUSIVE` (inconsistent reproduction).
+3. **Member-by-Member Necessity Analysis**:
+   - For each candidate $c \in S$, tests the subset $S \setminus \{c\}$ to evaluate necessity.
+   - If $S \setminus \{c\}$ fails: $c$ is a **bystander** (symptom still reproduces without it).
+   - If $S \setminus \{c\}$ passes: $c$ is **necessary** for the failure.
+   - Single-element sets where $S = \{c\}$ are classified as `VERIFIED_SET` (1-minimal).
+   - Multi-element sets where all members are required are classified as `VERIFIED_INTERACTION` (multi-change interaction).
+   - Sets where only some members are necessary are classified as `PARTIALLY_SUPPORTED`.
+4. **Safe Reversal Validation (Optional)**:
+   - If a reversal action or hook is provided, verifies that restoring or undoing the change resolves the failure.
+   - Enforces dual-exception safety and mandatory cleanup in `finally` blocks.
+5. **Differential Baseline Validation (Optional)**:
+   - Evaluates whether the candidate set $S$ reproduces the failure against an alternative verified baseline $B_2$ (e.g. a different OS configuration or build).
+   - Distinguishes environment-portable causes from baseline-specific defects.
+6. **Synthesis into Evidence-Backed Findings**:
+   - Synthesizes all trial results, necessity classifications, and differential comparisons into an audit matrix with explicit rationale and limitations.
+
+### Explicit Verification Verdicts:
+- `VERIFIED_SET`: Candidate set reproduces failure and is strictly 1-minimal.
+- `VERIFIED_INTERACTION`: Multi-change set requires all members concurrently to trigger failure.
+- `PARTIALLY_SUPPORTED`: Failure reproduced, but some candidates were identified as bystanders.
+- `NOT_REPRODUCED`: Symptom did not manifest when candidates were applied.
+- `INCONCLUSIVE`: Repeated health check attempts disagreed or timed out.
+- `INVALID_BASELINE`: Baseline control check failed prior to change application.
+- `ENVIRONMENT_CORRUPTED`: Target environment encountered cleanup or restore failure and was quarantined.
+- `CANCELLED`: User interrupted the verification run.
+
+### Limitations & Causality Disclaimer:
+- **Evidence-Backed, Not Causal Proof**: Verification results prove reproduction in the tested environment under specific health-check conditions. They do not claim universal causality or system-wide immunity.
+
+## 10. Persistence, Evidence Model & Migrations
 
 - Default database: `data/statebisect.db`.
 - **Schema Migrations**:
-  - Automatically manages migrations up to Version 7 in `schema_migrations`.
-  - Non-destructive and idempotent: preserves all existing investigations, trials, snapshots, monitoring sessions, candidates, and reviews.
+  - Automatically manages migrations up to Version 8 in `schema_migrations`.
+  - Non-destructive and idempotent: preserves all existing investigations, trials, snapshots, monitoring sessions, candidates, environments, and baselines.
   - Tables:
     - `investigations`, `experiment_trials`, `audit_logs`, `health_check_evidence` (Phases 1–3).
     - `collection_runs`, `snapshot_records`, `coverage_gaps`, `snapshot_diffs` (Phase 4).
     - `monitoring_sessions`, `monitoring_events`, `monitoring_coverage_gaps` (Phase 5).
     - `investigation_candidates`, `candidate_reviews` (Phase 6).
     - `registered_environments`, `registered_baselines`, `isolated_trials` (Phase 7).
+    - `verification_runs`, `verification_trials` (Phase 8).
 
-## 10. Command-Line Interface (CLI)
+## 11. Command-Line Interface (CLI)
 
 ```powershell
 # --- Investigation & Simulation Commands ---
@@ -326,11 +374,25 @@ python statebisect_cli.py run-trial --env-id sim-env-default --baseline-id basel
 
 # 4. Run Delta Debugging minimization over an isolated adapter
 python statebisect_cli.py run-minimization --env-id sim-env-default --baseline-id baseline-001 --changes c1,c2,c3
+
+# --- Verification & Reproduction Commands (Phase 8) ---
+# 1. Dry-run preview of verification trial plan
+python statebisect_cli.py preview-verification --env-id sim-env-default --baseline-id baseline-001 --changes c1,c2 --differential-baseline baseline-alt
+
+# 2. Execute 6-stage verification protocol
+python statebisect_cli.py run-verification --env-id sim-env-default --baseline-id baseline-001 --changes c1,c2 --repeats 2 --differential-baseline baseline-alt
+
+# 3. Inspect verification audit record
+python statebisect_cli.py inspect-verification <verification_run_id>
+python statebisect_cli.py inspect-verification <verification_run_id> --format json
+
+# 4. Export verification findings report
+python statebisect_cli.py export-verification <verification_run_id> -o verification_report.json --format json
 ```
 
-## 11. Running Tests and Demos
+## 12. Running Tests and Demos
 
-### Run Full Test Suite (119 Tests Across 13 Modules)
+### Run Full Test Suite (136 Tests Across 14 Modules)
 ```powershell
 python -m unittest discover -s tests -v
 ```
@@ -340,7 +402,7 @@ python -m unittest discover -s tests -v
 python demo_phase1.py
 ```
 
-## 12. Phase Status
+## 13. Phase Status
 
 - [x] **Phase 0 — Repository review & product skeleton**: Completed.
 - [x] **Phase 1 — Simulated experiment runner & Delta Debugging**: Completed.
@@ -350,4 +412,5 @@ python demo_phase1.py
 - [x] **Phase 5 — Targeted continuous collection & lightweight monitoring**: Completed.
 - [x] **Phase 6 — Candidate change generation & correlation engine**: Completed.
 - [x] **Phase 7 — Isolated trial runner & VM/Sandbox abstraction**: Completed.
-- [ ] **Phase 8 — Verification, reproduction, and differential validation**: Next phase.
+- [x] **Phase 8 — Verification, reproduction, and differential validation**: Completed.
+- [ ] **Phase 9 — Investigation Dashboard & Visualization**: Next phase.

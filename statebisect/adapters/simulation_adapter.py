@@ -63,6 +63,10 @@ class SimulationAdapter(BaseEnvironmentAdapter):
     def get_adapter_type(self) -> AdapterType:
         return AdapterType.SIMULATION
 
+    def get_workspace(self, environment_id: str = "") -> SimulatedWorkspace:
+        """Return the underlying simulation workspace."""
+        return self.workspace
+
     def list_registered_environments(self) -> list[EnvironmentRecord]:
         return list(self._environments.values())
 
