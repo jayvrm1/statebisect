@@ -191,6 +191,7 @@
         <button class="nav-btn" id="subtab-trials" role="tab" aria-selected="false" aria-controls="subview-trials">Experiments &amp; Trials</button>
         <button class="nav-btn" id="subtab-verification" role="tab" aria-selected="false" aria-controls="subview-verification">Verification Matrix</button>
         <button class="nav-btn" id="subtab-report" role="tab" aria-selected="false" aria-controls="subview-report">Diagnostic Report</button>
+        <button class="nav-btn" id="subtab-ai" role="tab" aria-selected="false" aria-controls="subview-ai">🤖 Ask AI Explainer</button>
       </nav>
 
       <!-- SUBVIEW A: TIMELINE -->
@@ -341,6 +342,156 @@
             </div>
           </div>
           <pre class="report-box" id="diagnostic-report-content">Generating report...</pre>
+        </div>
+      </div>
+
+      <!-- SUBVIEW F: AI EXPLAINER (PHASE 10) -->
+      <div id="subview-ai" class="subview-panel" style="display:none;">
+        <div class="section-container">
+          <div class="section-header">
+            <h3 class="section-title">
+              <span aria-hidden="true">🤖</span> Evidence-Grounded AI Explanation Layer
+            </h3>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <span class="badge" id="ai-provider-badge">Mock (Local)</span>
+              <span class="badge badge-pass" id="ai-status-badge">READY</span>
+            </div>
+          </div>
+
+          <aside class="notice-box" role="region" aria-label="AI Authority Boundary">
+            <div class="notice-icon" aria-hidden="true">ℹ️</div>
+            <div class="notice-content">
+              <p>
+                <strong>Sole Authority Invariant:</strong> The deterministic StateBisect engine remains the sole authority for verified findings, candidate scores, and experiment outcomes. AI explanations are evidence summaries and unverified hypotheses. AI has zero access to shell commands, files, or execution tools.
+              </p>
+            </div>
+          </aside>
+
+          <!-- Provider & Mode Selection Bar -->
+          <div style="display:flex; gap:1rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap; background:var(--bg-secondary); padding:0.75rem 1rem; border-radius:6px; border:1px solid var(--border-color);">
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+              <label for="ai-provider-select" style="font-size:0.85rem; font-weight:600;">Provider:</label>
+              <select id="ai-provider-select" class="form-select" style="min-width:140px; padding:0.3rem 0.6rem;">
+                <option value="mock">Mock Engine (Local Deterministic)</option>
+                <option value="openai">OpenAI (Remote gpt-4o-mini)</option>
+              </select>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-ai-preview-context">
+              🔍 Review Evidence Context (<span id="ai-context-bytes-label">Preview</span>)
+            </button>
+            <button class="btn btn-secondary btn-sm" id="btn-ai-fallback-summary">
+              ⚡ Deterministic Summary (No AI)
+            </button>
+          </div>
+
+          <!-- Context Preview Drawer (Expandable) -->
+          <div id="ai-context-preview-drawer" style="display:none; margin-bottom:1.5rem; background:var(--bg-surface); border:1px solid var(--border-color); border-radius:6px; padding:1rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+              <h4 style="margin:0; font-size:0.95rem;">Evidence Context Review (Exact Payload Sent)</h4>
+              <button class="btn btn-secondary btn-sm" id="btn-ai-close-preview">Close Preview</button>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.75rem;">
+              SHA-256: <code id="preview-hash" style="font-size:0.75rem;">-</code> | Items: <span id="preview-items">-</span> | Redacted: <span id="preview-redacted">-</span> | Omitted: <span id="preview-omitted">-</span>
+            </p>
+            <pre id="preview-json-box" style="max-height:220px; overflow-y:auto; font-size:0.75rem; background:var(--bg-main); padding:0.75rem; border-radius:4px; border:1px solid var(--border-color); margin:0;">Loading preview...</pre>
+          </div>
+
+          <!-- Remote Consent Warning Checkbox (Visible only when remote provider chosen) -->
+          <div id="ai-remote-consent-bar" style="display:none; margin-bottom:1rem; padding:0.75rem 1rem; border-radius:6px; background:#fff3cd; border:1px solid #ffeeba; color:#856404;">
+            <label style="display:flex; align-items:flex-start; gap:0.5rem; font-size:0.85rem; cursor:pointer;">
+              <input type="checkbox" id="ai-remote-consent-checkbox" style="margin-top:0.2rem;">
+              <span>
+                <strong>Confirm Remote Data Transmission:</strong> I have reviewed the evidence context preview above and authorize sending this investigation's redacted evidence to the remote provider (<span id="ai-remote-provider-name">OpenAI</span>). No credentials or secrets are included.
+              </span>
+            </label>
+          </div>
+
+          <!-- Question Input Box -->
+          <div style="display:flex; gap:0.75rem; margin-bottom:1.5rem;">
+            <input type="text" id="ai-question-input" class="form-input" style="flex:1;" placeholder="Ask a question about this investigation (e.g. 'Why did the payment service handshake fail?')">
+            <button class="btn btn-primary" id="btn-ai-submit-question">
+              Ask AI Explainer
+            </button>
+          </div>
+
+          <!-- Suggested Questions Quick Buttons -->
+          <div id="ai-suggested-questions-pills" style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1.5rem;">
+            <span style="font-size:0.8rem; color:var(--text-muted); align-self:center;">Suggested:</span>
+            <button class="btn btn-secondary btn-sm ai-quick-q" data-q="What candidate changes had the closest timestamp to symptom onset?">Closest timestamp?</button>
+            <button class="btn btn-secondary btn-sm ai-quick-q" data-q="Did the baseline control trial pass before testing candidate changes?">Baseline control?</button>
+            <button class="btn btn-secondary btn-sm ai-quick-q" data-q="Were any candidate changes proven strictly necessary to reproduce the failure?">Necessity verified?</button>
+            <button class="btn btn-secondary btn-sm ai-quick-q" data-q="What coverage gaps or telemetry limitations were detected?">Coverage gaps?</button>
+          </div>
+
+          <!-- AI Explanation Result Box -->
+          <div id="ai-response-container" style="display:none; margin-bottom:2rem;">
+            <!-- Short Answer Banner -->
+            <div style="background:var(--bg-secondary); border-left:4px solid var(--accent); padding:1rem 1.25rem; border-radius:0 6px 6px 0; margin-bottom:1.25rem;">
+              <h4 style="margin:0 0 0.5rem 0; font-size:0.95rem; color:var(--text-main);">Summary Answer</h4>
+              <p id="ai-response-short-answer" style="margin:0; font-size:0.95rem; line-height:1.5;"></p>
+            </div>
+
+            <!-- Evidence Observations Section -->
+            <div style="margin-bottom:1.25rem;">
+              <h4 style="margin:0 0 0.5rem 0; font-size:0.9rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted);">
+                Evidence-Backed Observations
+              </h4>
+              <div id="ai-response-observations" class="timeline-list">
+                <!-- Observation cards -->
+              </div>
+            </div>
+
+            <!-- Hypotheses Section -->
+            <div style="margin-bottom:1.25rem;">
+              <h4 style="margin:0 0 0.5rem 0; font-size:0.9rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted);">
+                Hypotheses (Clearly Labeled)
+              </h4>
+              <div id="ai-response-hypotheses">
+                <!-- Hypotheses cards -->
+              </div>
+            </div>
+
+            <!-- Unknowns & Safe Next Questions Grid -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1.25rem;">
+              <div style="background:var(--bg-secondary); padding:1rem; border-radius:6px; border:1px solid var(--border-color);">
+                <h4 style="margin:0 0 0.5rem 0; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted);">
+                  Unknowns &amp; Coverage Gaps
+                </h4>
+                <ul id="ai-response-unknowns" style="margin:0; padding-left:1.2rem; font-size:0.85rem; color:var(--text-main);">
+                </ul>
+              </div>
+              <div style="background:var(--bg-secondary); padding:1rem; border-radius:6px; border:1px solid var(--border-color);">
+                <h4 style="margin:0 0 0.5rem 0; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted);">
+                  Suggested Safe Next Questions
+                </h4>
+                <ul id="ai-response-safe-questions" style="margin:0; padding-left:1.2rem; font-size:0.85rem; color:var(--text-main);">
+                </ul>
+              </div>
+            </div>
+
+            <!-- Citations Index -->
+            <div style="background:var(--bg-surface); padding:1rem; border-radius:6px; border:1px solid var(--border-color); margin-bottom:1rem;">
+              <h4 style="margin:0 0 0.5rem 0; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted);">
+                Evidence References Cited
+              </h4>
+              <div id="ai-response-citations" style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                <!-- Citation badges -->
+              </div>
+            </div>
+
+            <p style="font-size:0.75rem; color:var(--text-muted); font-style:italic; margin:0;" id="ai-response-disclaimer"></p>
+          </div>
+
+          <!-- Saved Explanations Audit History -->
+          <div style="border-top:1px solid var(--border-color); padding-top:1.5rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+              <h4 style="margin:0; font-size:0.95rem;">Investigation Explanation History</h4>
+              <button class="btn btn-secondary btn-sm" id="btn-ai-clear-history">Clear History</button>
+            </div>
+            <div id="ai-history-list">
+              <p style="color:var(--text-muted); font-size:0.85rem;">No saved explanations yet.</p>
+            </div>
+          </div>
         </div>
       </div>
     </section>

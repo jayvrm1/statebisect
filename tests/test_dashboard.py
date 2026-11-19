@@ -479,6 +479,91 @@ class TestDashboardServerAndApi(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             self.assertIn("text/css", resp.headers.get("Content-Type", ""))
 
+    def test_ai_status_and_context_preview_endpoints(self) -> None:
+        """GET /api/ai/status and /api/investigations/{id}/ai/context-preview return correct data."""
+        # 1. AI Status
+        req_status = urllib.request.Request(f"{self.base_url}/api/ai/status?provider=mock")
+        with urllib.request.urlopen(req_status) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode())
+            self.assertTrue(data["service_enabled"])
+            self.assertEqual(data["status"], "READY")
+            self.assertEqual(data["data_classification"], "LOCAL")
+
+        # 2. Context Preview
+        req_prev = urllib.request.Request(f"{self.base_url}/api/investigations/{self.inv.id}/ai/context-preview?provider=mock")
+        with urllib.request.urlopen(req_prev) as resp:
+            self.assertEqual(resp.status, 200)
+            prev = json.loads(resp.read().decode())
+            self.assertEqual(prev["investigation_id"], self.inv.id)
+            self.assertIn("context_hash", prev)
+            self.assertTrue(len(prev["evidence_ids"]) >= 1)
+
+    def test_ai_explain_and_history_endpoints(self) -> None:
+        """POST /api/investigations/{id}/ai/explain generates response and logs to history."""
+        # 1. Explain
+        req_exp = urllib.request.Request(
+            f"{self.base_url}/api/investigations/{self.inv.id}/ai/explain",
+            data=json.dumps({"question": "Why did the service fail?", "provider": "mock"}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "X-StateBisect-Request": "1"},
+        )
+        with urllib.request.urlopen(req_exp) as resp:
+            self.assertEqual(resp.status, 200)
+            exp_data = json.loads(resp.read().decode())
+            self.assertEqual(exp_data["status"], "SUCCESS")
+            self.assertTrue(len(exp_data["observations"]) >= 1)
+
+        # 2. History
+        req_hist = urllib.request.Request(f"{self.base_url}/api/investigations/{self.inv.id}/ai/history")
+        with urllib.request.urlopen(req_hist) as resp:
+            self.assertEqual(resp.status, 200)
+            hist = json.loads(resp.read().decode())
+            self.assertTrue(hist["total"] >= 1)
+
+        # 3. Clear History
+        req_clear = urllib.request.Request(
+            f"{self.base_url}/api/investigations/{self.inv.id}/ai/history",
+            method="DELETE",
+            headers={"X-StateBisect-Request": "1"},
+        )
+        with urllib.request.urlopen(req_clear) as resp:
+            self.assertEqual(resp.status, 200)
+            res = json.loads(resp.read().decode())
+            self.assertTrue(res["deleted_count"] >= 1)
+
+    def test_mcp_json_rpc_endpoint(self) -> None:
+        """POST /api/mcp handles read-only tools/list and tools/call JSON-RPC 2.0 requests."""
+        # tools/list
+        req_list = urllib.request.Request(
+            f"{self.base_url}/api/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": 10, "method": "tools/list"}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "X-StateBisect-Request": "1"},
+        )
+        with urllib.request.urlopen(req_list) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode())
+            self.assertEqual(len(data["result"]["tools"]), 4)
+
+        # tools/call get_investigation_summary
+        req_call = urllib.request.Request(
+            f"{self.base_url}/api/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {"name": "get_investigation_summary", "arguments": {"investigation_id": self.inv.id}},
+            }).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "X-StateBisect-Request": "1"},
+        )
+        with urllib.request.urlopen(req_call) as resp:
+            self.assertEqual(resp.status, 200)
+            call_res = json.loads(resp.read().decode())
+            self.assertFalse(call_res["result"]["isError"])
+            self.assertIn("PaymentService", call_res["result"]["content"][0]["text"])
+
 
 class TestDashboardExceptionHandling(unittest.TestCase):
     """Verify that exception handling rules are strictly adhered to."""

@@ -142,6 +142,7 @@ function switchSubTab(subTabName) {
   else if (subTabName === "trials") loadTrials(state.currentInvId);
   else if (subTabName === "verification") loadVerifications(state.currentInvId);
   else if (subTabName === "report") loadReport(state.currentInvId);
+  else if (subTabName === "ai") loadAiExplainer(state.currentInvId);
 }
 
 // --- Data Loading Functions ---
@@ -761,6 +762,299 @@ document.addEventListener("DOMContentLoaded", () => {
   // Filter button for Investigations list
   document.getElementById("btn-apply-inv-filters").addEventListener("click", loadInvestigations);
 
+  // Subtab: AI Explainer
+  document.getElementById("subtab-ai").addEventListener("click", () => switchSubTab("ai"));
+
+  // AI Provider change listener
+  document.getElementById("ai-provider-select").addEventListener("change", (e) => {
+    updateAiProviderUi(e.target.value);
+  });
+
+  // AI Context Preview button
+  document.getElementById("btn-ai-preview-context").addEventListener("click", () => {
+    if (state.currentInvId) previewAiContext(state.currentInvId);
+  });
+  document.getElementById("btn-ai-close-preview").addEventListener("click", () => {
+    document.getElementById("ai-context-preview-drawer").style.display = "none";
+  });
+
+  // AI Question Submission
+  document.getElementById("btn-ai-submit-question").addEventListener("click", () => {
+    if (state.currentInvId) askAiExplainer(state.currentInvId, false);
+  });
+  document.getElementById("ai-question-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      if (state.currentInvId) askAiExplainer(state.currentInvId, false);
+    }
+  });
+
+  // Deterministic Fallback button
+  document.getElementById("btn-ai-fallback-summary").addEventListener("click", () => {
+    if (state.currentInvId) askAiExplainer(state.currentInvId, true);
+  });
+
+  // Clear AI History
+  document.getElementById("btn-ai-clear-history").addEventListener("click", () => {
+    if (state.currentInvId) clearAiHistory(state.currentInvId);
+  });
+
+  // Quick Suggested Questions
+  document.querySelectorAll(".ai-quick-q").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const q = e.target.getAttribute("data-q");
+      const input = document.getElementById("ai-question-input");
+      input.value = q;
+      input.focus();
+    });
+  });
+
   // Initial load
   loadOverview();
 });
+
+// --- Phase 10 AI Explainer UI Functions ---
+
+async function loadAiExplainer(invId) {
+  const provider = document.getElementById("ai-provider-select").value;
+  await updateAiProviderUi(provider);
+  await loadAiHistory(invId);
+}
+
+async function updateAiProviderUi(provider) {
+  try {
+    const statusData = await apiFetch(`/api/ai/status?provider=${encodeURIComponent(provider)}`);
+    const isRemote = statusData.data_classification === "REMOTE";
+    const statusBadge = document.getElementById("ai-status-badge");
+    const providerBadge = document.getElementById("ai-provider-badge");
+    const remoteConsentBar = document.getElementById("ai-remote-consent-bar");
+
+    providerBadge.textContent = `${statusData.provider_id.toUpperCase()} (${statusData.data_classification})`;
+    statusBadge.textContent = statusData.status;
+
+    if (statusData.status === "READY") {
+      statusBadge.className = "badge badge-pass";
+    } else if (statusData.status === "UNAVAILABLE") {
+      statusBadge.className = "badge badge-unavailable";
+    } else {
+      statusBadge.className = "badge badge-fail";
+    }
+
+    if (isRemote) {
+      remoteConsentBar.style.display = "block";
+      document.getElementById("ai-remote-provider-name").textContent = statusData.provider_id.toUpperCase();
+    } else {
+      remoteConsentBar.style.display = "none";
+    }
+  } catch (err) {
+    console.warn("Could not check AI status:", err);
+  }
+}
+
+async function previewAiContext(invId) {
+  const provider = document.getElementById("ai-provider-select").value;
+  const drawer = document.getElementById("ai-context-preview-drawer");
+  const jsonBox = document.getElementById("preview-json-box");
+  jsonBox.textContent = "Loading exact evidence payload...";
+  drawer.style.display = "block";
+
+  try {
+    const preview = await apiFetch(`/api/investigations/${encodeURIComponent(invId)}/ai/context-preview?provider=${encodeURIComponent(provider)}`);
+    document.getElementById("preview-hash").textContent = preview.context_hash.substring(0, 16) + "...";
+    document.getElementById("preview-items").textContent = preview.total_evidence_items;
+    document.getElementById("preview-redacted").textContent = preview.redacted_items_count;
+    document.getElementById("preview-omitted").textContent = preview.omitted_items_count;
+    document.getElementById("ai-context-bytes-label").textContent = `${Math.round(preview.byte_size / 1024)} KB`;
+    jsonBox.textContent = JSON.stringify(preview.payload_preview, null, 2);
+  } catch (err) {
+    jsonBox.textContent = `Error loading preview: ${err.message}`;
+  }
+}
+
+async function askAiExplainer(invId, isFallback) {
+  const questionInput = document.getElementById("ai-question-input");
+  const question = questionInput.value.trim() || (isFallback ? "Provide a deterministic evidence summary." : "");
+  if (!question && !isFallback) {
+    alert("Please enter a question to ask.");
+    return;
+  }
+
+  const provider = document.getElementById("ai-provider-select").value;
+  const consentCheckbox = document.getElementById("ai-remote-consent-checkbox");
+  const confirmRemote = consentCheckbox.checked;
+
+  const btnSubmit = document.getElementById("btn-ai-submit-question");
+  const origBtnText = btnSubmit.textContent;
+  btnSubmit.disabled = true;
+  btnSubmit.textContent = "Analyzing evidence...";
+
+  const responseContainer = document.getElementById("ai-response-container");
+  responseContainer.style.display = "none";
+
+  try {
+    let resp;
+    if (isFallback) {
+      resp = await apiFetch(`/api/investigations/${encodeURIComponent(invId)}/ai/fallback-summary`, {
+        method: "POST",
+        body: { question },
+      });
+    } else {
+      resp = await apiFetch(`/api/investigations/${encodeURIComponent(invId)}/ai/explain`, {
+        method: "POST",
+        body: { question, provider, confirm_remote: confirmRemote },
+      });
+    }
+
+    renderAiResponse(resp);
+    loadAiHistory(invId);
+  } catch (err) {
+    alert(`AI Explanation Error: ${err.message}`);
+  } finally {
+    btnSubmit.disabled = false;
+    btnSubmit.textContent = origBtnText;
+  }
+}
+
+function renderAiResponse(resp) {
+  const container = document.getElementById("ai-response-container");
+  container.style.display = "block";
+
+  // Short Answer
+  document.getElementById("ai-response-short-answer").textContent = resp.short_answer;
+  document.getElementById("ai-response-disclaimer").textContent = resp.disclaimer;
+
+  // Observations
+  const obsContainer = document.getElementById("ai-response-observations");
+  obsContainer.innerHTML = "";
+  if (!resp.observations || resp.observations.length === 0) {
+    obsContainer.innerHTML = `<p style="color:var(--text-muted); font-size:0.85rem;">No observations available.</p>`;
+  } else {
+    resp.observations.forEach((obs) => {
+      const citePills = (obs.evidence_ids || [])
+        .map((eid) => `<span class="badge badge-secondary" style="font-size:0.7rem; font-family:var(--font-mono);">${escapeHtml(eid)}</span>`)
+        .join(" ");
+      const item = document.createElement("div");
+      item.className = "timeline-item";
+      item.style.padding = "0.6rem 0.8rem";
+      item.innerHTML = `
+        <div style="font-size:0.85rem; color:var(--text-main); margin-bottom:0.25rem;">${escapeHtml(obs.statement)}</div>
+        <div style="display:flex; gap:0.25rem; align-items:center;">
+          <span style="font-size:0.75rem; color:var(--text-muted);">Cited:</span> ${citePills}
+        </div>
+      `;
+      obsContainer.appendChild(item);
+    });
+  }
+
+  // Hypotheses
+  const hypContainer = document.getElementById("ai-response-hypotheses");
+  hypContainer.innerHTML = "";
+  if (!resp.hypotheses || resp.hypotheses.length === 0) {
+    hypContainer.innerHTML = `<p style="color:var(--text-muted); font-size:0.85rem;">No hypotheses generated.</p>`;
+  } else {
+    resp.hypotheses.forEach((hyp) => {
+      const card = document.createElement("div");
+      card.style.background = "var(--bg-secondary)";
+      card.style.border = "1px solid var(--border-color)";
+      card.style.borderRadius = "6px";
+      card.style.padding = "0.75rem 1rem";
+      card.style.marginBottom = "0.5rem";
+
+      const forCites = (hyp.evidence_for || []).map((e) => `<code style="font-size:0.7rem;">${escapeHtml(e)}</code>`).join(", ") || "None";
+      const againstCites = (hyp.evidence_against || []).map((e) => `<code style="font-size:0.7rem;">${escapeHtml(e)}</code>`).join(", ") || "None";
+
+      card.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
+          <span style="font-size:0.85rem; font-weight:600; color:var(--text-main);">${escapeHtml(hyp.statement)}</span>
+          <span class="badge badge-inconclusive" style="font-size:0.7rem;">${escapeHtml(hyp.confidence_label)}</span>
+        </div>
+        <div style="font-size:0.75rem; color:var(--text-muted);">
+          <span>For: ${forCites}</span> | <span>Against: ${againstCites}</span>
+        </div>
+      `;
+      hypContainer.appendChild(card);
+    });
+  }
+
+  // Unknowns
+  const unknownsList = document.getElementById("ai-response-unknowns");
+  unknownsList.innerHTML = "";
+  (resp.unknowns || []).forEach((u) => {
+    const li = document.createElement("li");
+    li.style.marginBottom = "0.25rem";
+    li.textContent = u;
+    unknownsList.appendChild(li);
+  });
+
+  // Suggested safe questions
+  const questionsList = document.getElementById("ai-response-safe-questions");
+  questionsList.innerHTML = "";
+  (resp.suggested_safe_questions || []).forEach((q) => {
+    const li = document.createElement("li");
+    li.style.marginBottom = "0.25rem";
+    li.style.cursor = "pointer";
+    li.style.color = "var(--accent)";
+    li.textContent = q;
+    li.title = "Click to ask this question";
+    li.addEventListener("click", () => {
+      document.getElementById("ai-question-input").value = q;
+      document.getElementById("ai-question-input").focus();
+    });
+    questionsList.appendChild(li);
+  });
+
+  // Citations index
+  const citContainer = document.getElementById("ai-response-citations");
+  citContainer.innerHTML = "";
+  (resp.evidence_references || []).forEach((ref) => {
+    const pill = document.createElement("span");
+    const validClass = ref.is_valid !== false ? "badge-pass" : "badge-fail";
+    pill.className = `badge ${validClass}`;
+    pill.style.fontFamily = "var(--font-mono)";
+    pill.style.fontSize = "0.75rem";
+    pill.textContent = `${ref.evidence_id} (${ref.evidence_type})`;
+    pill.title = ref.summary || ref.validation_note || "";
+    citContainer.appendChild(pill);
+  });
+}
+
+async function loadAiHistory(invId) {
+  const container = document.getElementById("ai-history-list");
+  try {
+    const histData = await apiFetch(`/api/investigations/${encodeURIComponent(invId)}/ai/history`);
+    if (!histData.history || histData.history.length === 0) {
+      container.innerHTML = `<p style="color:var(--text-muted); font-size:0.85rem;">No saved explanations yet.</p>`;
+      return;
+    }
+
+    container.innerHTML = "";
+    histData.history.forEach((rec) => {
+      const card = document.createElement("div");
+      card.style.background = "var(--bg-secondary)";
+      card.style.border = "1px solid var(--border-color)";
+      card.style.borderRadius = "4px";
+      card.style.padding = "0.6rem 0.8rem";
+      card.style.marginBottom = "0.5rem";
+      card.innerHTML = `
+        <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:var(--text-muted); margin-bottom:0.25rem;">
+          <span>${escapeHtml(rec.created_at)} | Provider: <strong>${escapeHtml(rec.provider_id)}</strong></span>
+          <span class="badge ${rec.status === 'SUCCESS' ? 'badge-pass' : 'badge-fail'}" style="font-size:0.65rem;">${escapeHtml(rec.status)}</span>
+        </div>
+        <div style="font-size:0.85rem; font-weight:600; margin-bottom:0.25rem;">Q: ${escapeHtml(rec.question)}</div>
+        <div style="font-size:0.8rem; color:var(--text-main);">${escapeHtml(rec.short_answer)}</div>
+      `;
+      container.appendChild(card);
+    });
+  } catch (err) {
+    container.innerHTML = `<p style="color:var(--text-muted); font-size:0.85rem;">Could not load explanation history.</p>`;
+  }
+}
+
+async function clearAiHistory(invId) {
+  if (!confirm("Are you sure you want to clear all saved AI explanations for this investigation?")) return;
+  try {
+    await apiFetch(`/api/investigations/${encodeURIComponent(invId)}/ai/history`, { method: "DELETE" });
+    loadAiHistory(invId);
+  } catch (err) {
+    alert(`Could not clear history: ${err.message}`);
+  }
+}

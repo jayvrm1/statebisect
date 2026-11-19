@@ -1,7 +1,7 @@
 # StateBisect
 
-> **Notice: Local Investigation API and Dashboard (Phase 9)**  
-> StateBisect is currently in a Phase 9 state. It features a strictly loopback-bound (`127.0.0.1` / `::1`) local investigation HTTP server, REST API, and single-page dashboard UI. **No modifications are made to the host Windows registry, files, services, or system configuration.** All experiments and verifications run exclusively against in-memory simulations or explicitly registered disposable environments. The API enforces strict DNS rebinding defense (`Host` header validation), origin verification, anti-CSRF request header checks, Content Security Policy (`default-src 'self'`), size-bounded JSON bodies, and sensitive data redaction. Zero execution endpoints exist: the dashboard cannot execute arbitrary commands, scripts, or live code against the host. All rankings represent experimental search priority for Delta Debugging, not proof of fault.
+> **Notice: Evidence-Grounded AI Explanation Layer (Phase 10)**  
+> StateBisect is currently in a Phase 10 state. It features an optional, provider-neutral AI explanation layer grounded strictly in recorded investigation evidence. **The deterministic engine remains the sole authority for verified findings, candidate rankings, and safety decisions.** AI explanations are explicitly labeled as evidence summaries and unverified hypotheses; the AI layer cannot alter engine scores or verdicts, execute commands, modify configuration, or perform repairs. Data privacy is strictly enforced: remote transmission requires explicit user confirmation and context review, while an offline deterministic mock provider and fallback summary ensure full functionality without external network calls or credentials. Zero modifications are made to the host Windows registry, files, services, or system configuration.
 
 ## 1. Product Mission
 
@@ -85,6 +85,17 @@ statebisect/
 │   │       ├── index.html   # Semantic, accessible dashboard interface
 │   │       ├── style.css    # High-contrast responsive styling
 │   │       └── app.js       # Modern vanilla ES2022 dashboard controller
+│   ├── ai/                  # Grounded AI explanation layer (Phase 10)
+│   │   ├── __init__.py      # AI exports
+│   │   ├── models.py        # Typed data contracts (Observations, Hypotheses, EvidenceReference, Preview)
+│   │   ├── context.py       # EvidenceContextBuilder with secret scrubbing, size bounds & context hash
+│   │   ├── validator.py     # OutputValidator checking citation grounding, causality invariants & XSS
+│   │   ├── service.py       # ExplanationService orchestrating providers, fallback summaries & audit log
+│   │   ├── mcp_tools.py     # Read-only Model Context Protocol (MCP) JSON-RPC 2.0 tool server
+│   │   └── providers/       # Pluggable LLM and mock explanation providers
+│   │       ├── base.py      # ExplanationProvider abstract interface
+│   │       ├── mock_provider.py # Deterministic mock provider with adversarial test flags
+│   │       └── openai_provider.py # Zero-dep OpenAI Structured Outputs provider (urllib.request)
 │   ├── health_checks/       # Pluggable, versioned health-check system
 │   │   ├── base.py          # BaseHealthCheck, evidence bounding, and secret redaction
 │   │   ├── simulated_state.py # State condition matcher (key-value and compound)
@@ -98,6 +109,7 @@ statebisect/
 │   ├── storage.py           # SQLite persistence layer with schema migrations & evidence store
 │   └── reporting.py         # Diagnostic text and JSON report generators
 ├── tests/
+│   ├── test_ai.py           # Phase 10 AI explanation grounding, citations, invariants, MCP, and security
 │   ├── test_dashboard.py    # Phase 9 dashboard API, security boundaries, and CSRF tests
 │   ├── test_verification.py # Phase 8 verification protocol, necessity, reversal, and CLI tests
 │   ├── test_adapters.py     # Phase 7 adapter lifecycle, runner, and Hyper-V safety tests
@@ -409,11 +421,27 @@ python statebisect_cli.py dashboard --port 8888 --no-browser
 
 # 3. Use custom database path with dashboard
 python statebisect_cli.py --db my_investigation.db dashboard
+
+# --- AI Explanation Layer Commands (Phase 10) ---
+# 1. Check AI explainer status & configured provider
+python statebisect_cli.py ai-status
+
+# 2. Preview redacted evidence context bundle before sending to remote model
+python statebisect_cli.py ai-context-preview <investigation_id>
+python statebisect_cli.py ai-context-preview <investigation_id> --format json
+
+# 3. Generate grounded AI explanation (requires --confirm-remote for remote providers)
+python statebisect_cli.py ai-explain <investigation_id> --provider mock
+python statebisect_cli.py ai-explain <investigation_id> --provider openai --confirm-remote --question "Why did TLS handshake fail?"
+
+# 4. Inspect or clear explanation audit history
+python statebisect_cli.py ai-history <investigation_id>
+python statebisect_cli.py ai-clear-history <investigation_id>
 ```
 
 ## 12. Running Tests and Demos
 
-### Run Full Test Suite (154 Tests Across 15 Modules)
+### Run Full Test Suite (172 Tests Across 16 Modules)
 ```powershell
 python -m unittest discover -s tests -v
 ```
@@ -435,4 +463,5 @@ python demo_phase1.py
 - [x] **Phase 7 — Isolated trial runner & VM/Sandbox abstraction**: Completed.
 - [x] **Phase 8 — Verification, reproduction, and differential validation**: Completed.
 - [x] **Phase 9 — Investigation Dashboard & Visualization**: Completed.
-- [ ] **Phase 10 — AI Explanation Layer & Synthesis**: Next phase.
+- [x] **Phase 10 — AI Explanation Layer & Synthesis**: Completed.
+- [ ] **Phase 11 — Benchmarking, Release Hardening, & Distribution**: Next phase.

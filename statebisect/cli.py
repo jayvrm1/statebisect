@@ -2039,6 +2039,200 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
             storage.close()
 
 
+def cmd_ai_status(args: argparse.Namespace) -> int:
+    """Check AI explanation provider status and health."""
+    from .ai.service import ExplanationService
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        service = ExplanationService(storage)
+        status_dict = service.get_status(getattr(args, "provider", None))
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps(status_dict, indent=2))
+        else:
+            print("=" * 80)
+            print("STATEBISECT AI EXPLANATION SERVICE STATUS")
+            print("=" * 80)
+            print(f"Service Enabled       : {status_dict.get('service_enabled')}")
+            print(f"Operational Status    : {status_dict.get('status')}")
+            print(f"Active Provider       : {status_dict.get('provider_id')}")
+            print(f"Model Identifier      : {status_dict.get('model_id', 'N/A')}")
+            print(f"Data Classification   : {status_dict.get('data_classification')}")
+            print(f"Status Message        : {status_dict.get('message')}")
+            print(f"Available Providers   : {status_dict.get('available_providers')}")
+            print(f"Audit Persistence     : {'Enabled' if status_dict.get('persistence_enabled') else 'Disabled'}")
+            print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"AI Status Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_ai_context_preview(args: argparse.Namespace) -> int:
+    """Preview the exact evidence context payload that would be supplied to an AI provider."""
+    from .ai.service import ExplanationService
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        service = ExplanationService(storage)
+        preview = service.get_context_preview(args.investigation_id, getattr(args, "provider", None))
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps(preview.to_dict(), indent=2))
+        else:
+            print("=" * 80)
+            print("STATEBISECT EVIDENCE CONTEXT PREVIEW (PRIVACY & BOUNDARY REVIEW)")
+            print("=" * 80)
+            print(f"Investigation ID     : {preview.investigation_id}")
+            print(f"Target Provider      : {preview.provider_id}")
+            print(f"Data Classification  : {preview.data_classification.value}")
+            print(f"Context SHA-256 Hash : {preview.context_hash}")
+            print(f"Total Evidence Items : {preview.total_evidence_items}")
+            print(f"Redacted Items Count : {preview.redacted_items_count}")
+            print(f"Omitted Items Count  : {preview.omitted_items_count}")
+            print(f"Payload Size (Bytes) : {preview.byte_size} bytes (~{preview.approximate_tokens} tokens)")
+            print("-" * 80)
+            print(f"Evidence ID Index ({len(preview.evidence_ids)} items):")
+            for eid in preview.evidence_ids[:15]:
+                print(f"  * {eid}")
+            if len(preview.evidence_ids) > 15:
+                print(f"  ... and {len(preview.evidence_ids) - 15} more.")
+            print("=" * 80)
+            print("Note: Review only. No data was transmitted to any AI provider.")
+        return 0
+    except Exception as err:
+        print(f"AI Context Preview Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_ai_explain(args: argparse.Namespace) -> int:
+    """Ask an evidence-grounded natural language question about an investigation."""
+    from .ai.service import ExplanationService
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        service = ExplanationService(storage)
+
+        if args.deterministic_fallback:
+            resp = service.generate_deterministic_fallback(
+                investigation_id=args.investigation_id,
+                question=args.question,
+                reason="User explicitly requested deterministic fallback.",
+            )
+        else:
+            resp = service.explain(
+                investigation_id=args.investigation_id,
+                question=args.question,
+                provider_id=getattr(args, "provider", None),
+                confirm_remote=args.confirm_remote,
+            )
+
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps(resp.to_dict(), indent=2))
+        else:
+            print("=" * 80)
+            print("STATEBISECT EVIDENCE-GROUNDED AI EXPLANATION")
+            print("=" * 80)
+            print(f"Investigation ID : {resp.investigation_id}")
+            print(f"Provider / Model : {resp.provider_id} ({resp.model_id})")
+            print(f"Status           : {resp.status.value}")
+            print(f"Question         : {resp.question}")
+            print("-" * 80)
+            print(f"SHORT ANSWER:\n{resp.short_answer}\n")
+            print("-" * 80)
+            print(f"EVIDENCE-BACKED OBSERVATIONS ({len(resp.observations)}):")
+            for idx, obs in enumerate(resp.observations, 1):
+                cites = f" [Cited: {', '.join(obs.evidence_ids)}]" if obs.evidence_ids else ""
+                print(f"  {idx}. {obs.statement}{cites}")
+            print("-" * 80)
+            print(f"HYPOTHESES ({len(resp.hypotheses)}):")
+            for idx, hyp in enumerate(resp.hypotheses, 1):
+                print(f"  {idx}. [{hyp.confidence_label}] {hyp.statement}")
+                if hyp.evidence_for:
+                    print(f"     Evidence For: {', '.join(hyp.evidence_for)}")
+                if hyp.evidence_against:
+                    print(f"     Evidence Against: {', '.join(hyp.evidence_against)}")
+            print("-" * 80)
+            print(f"UNKNOWNS & COVERAGE GAPS ({len(resp.unknowns)}):")
+            for u in resp.unknowns:
+                print(f"  * {u}")
+            print("-" * 80)
+            print(f"SUGGESTED SAFE NEXT QUESTIONS ({len(resp.suggested_safe_questions)}):")
+            for q in resp.suggested_safe_questions:
+                print(f"  ? {q}")
+            print("=" * 80)
+            print(f"DISCLAIMER: {resp.disclaimer}")
+            print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"AI Explain Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_ai_history(args: argparse.Namespace) -> int:
+    """List saved AI explanations for an investigation."""
+    from .ai.service import ExplanationService
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        service = ExplanationService(storage)
+        history = service.list_history(args.investigation_id, limit=args.limit)
+        if getattr(args, "format", "text") == "json":
+            print(json.dumps(history, indent=2))
+        else:
+            print("=" * 80)
+            print(f"AI EXPLANATION AUDIT HISTORY ({len(history)} records)")
+            print("=" * 80)
+            for r in history:
+                print(f"[{r.get('created_at')}] ID: {r.get('explanation_id')} | Provider: {r.get('provider_id')} | Status: {r.get('status')}")
+                print(f"  Q: {r.get('question')}")
+                print(f"  A: {r.get('short_answer')[:120]}...")
+                print("-" * 80)
+        return 0
+    except Exception as err:
+        print(f"AI History Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_ai_clear_history(args: argparse.Namespace) -> int:
+    """Clear saved AI explanations for an investigation."""
+    from .ai.service import ExplanationService
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        service = ExplanationService(storage)
+        count = service.clear_history(args.investigation_id)
+        print(f"Cleared {count} AI explanation records for investigation '{args.investigation_id}'.")
+        return 0
+    except Exception as err:
+        print(f"AI Clear History Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -2312,6 +2506,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_dash.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_dash.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # Phase 10 AI Explanation subcommands
+    # ai-status
+    p_ai_stat = subparsers.add_parser("ai-status", help="Check AI explanation provider status and health.")
+    p_ai_stat.add_argument("--provider", default=None, help="Target provider (default: mock; options: mock, openai).")
+    p_ai_stat.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_ai_stat.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_ai_stat.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # ai-context-preview
+    p_ai_prev = subparsers.add_parser("ai-context-preview", help="Preview exact evidence context payload for an investigation.")
+    p_ai_prev.add_argument("investigation_id", help="Investigation identifier.")
+    p_ai_prev.add_argument("--provider", default="mock", help="Target provider (default: mock; options: mock, openai).")
+    p_ai_prev.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_ai_prev.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_ai_prev.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # ai-explain
+    p_ai_exp = subparsers.add_parser("ai-explain", help="Ask an evidence-grounded natural language question about an investigation.")
+    p_ai_exp.add_argument("investigation_id", help="Investigation identifier.")
+    p_ai_exp.add_argument("--question", "-q", required=True, help="Natural language question to ask.")
+    p_ai_exp.add_argument("--provider", default="mock", help="Target provider (default: mock; options: mock, openai).")
+    p_ai_exp.add_argument("--confirm-remote", action="store_true", help="Explicit user consent required if using remote provider.")
+    p_ai_exp.add_argument("--deterministic-fallback", action="store_true", help="Generate deterministic evidence summary with zero AI calls.")
+    p_ai_exp.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_ai_exp.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_ai_exp.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # ai-history
+    p_ai_hist = subparsers.add_parser("ai-history", help="List saved AI explanations for an investigation.")
+    p_ai_hist.add_argument("investigation_id", help="Investigation identifier.")
+    p_ai_hist.add_argument("--limit", type=int, default=20, help="Max records to return.")
+    p_ai_hist.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_ai_hist.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_ai_hist.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # ai-clear-history
+    p_ai_clr = subparsers.add_parser("ai-clear-history", help="Clear saved AI explanations for an investigation.")
+    p_ai_clr.add_argument("investigation_id", help="Investigation identifier.")
+    p_ai_clr.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_ai_clr.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -2389,6 +2624,16 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_export_verification(args)
     elif args.command == "dashboard":
         return cmd_dashboard(args)
+    elif args.command == "ai-status":
+        return cmd_ai_status(args)
+    elif args.command == "ai-context-preview":
+        return cmd_ai_context_preview(args)
+    elif args.command == "ai-explain":
+        return cmd_ai_explain(args)
+    elif args.command == "ai-history":
+        return cmd_ai_history(args)
+    elif args.command == "ai-clear-history":
+        return cmd_ai_clear_history(args)
     else:
         parser.print_help()
         return 2

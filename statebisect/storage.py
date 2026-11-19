@@ -6,7 +6,10 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .ai.models import AiExplanationRecord
 
 from .collector.models import (
     CollectionRun,
@@ -57,7 +60,7 @@ from .monitor.models import (
     ProcessProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 
 class Storage:
@@ -604,6 +607,39 @@ class Storage:
                     """
                 )
                 current_ver = 8
+
+            # Migration 9: Phase 10 AI Explanations Audit Persistence
+            if current_ver < 9:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS ai_explanations (
+                        explanation_id TEXT PRIMARY KEY,
+                        investigation_id TEXT NOT NULL,
+                        provider_id TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        api_version TEXT NOT NULL,
+                        prompt_template_version TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        context_hash TEXT NOT NULL,
+                        evidence_ids_json TEXT NOT NULL,
+                        is_remote INTEGER NOT NULL,
+                        user_confirmed_remote INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        short_answer TEXT NOT NULL,
+                        structured_response_json TEXT NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (investigation_id) REFERENCES investigations(id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_ai_explanations_inv
+                    ON ai_explanations(investigation_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (9, datetime('now'), 'Add Phase 10 AI explanation records and evidence citations');
+                    """
+                )
+                current_ver = 9
 
     def log_audit(
         self,
@@ -1912,4 +1948,98 @@ class Storage:
             output_bounded=row["output_bounded"],
             duration_ms=row["duration_ms"],
             timestamp=row["timestamp"],
+        )
+
+    # --- Phase 10 AI Explanation Methods ---
+
+    def save_ai_explanation(self, record: AiExplanationRecord) -> None:
+        """Save an immutable AI explanation audit record."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO ai_explanations (
+                    explanation_id, investigation_id, provider_id, model_id,
+                    api_version, prompt_template_version, question, context_hash,
+                    evidence_ids_json, is_remote, user_confirmed_remote, status,
+                    short_answer, structured_response_json, duration_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.explanation_id,
+                    record.investigation_id,
+                    record.provider_id,
+                    record.model_id,
+                    record.api_version,
+                    record.prompt_template_version,
+                    record.question,
+                    record.context_hash,
+                    json.dumps(record.evidence_ids),
+                    1 if record.is_remote else 0,
+                    1 if record.user_confirmed_remote else 0,
+                    record.status.value if hasattr(record.status, "value") else str(record.status),
+                    record.short_answer,
+                    json.dumps(record.structured_response),
+                    record.duration_ms,
+                    record.created_at,
+                ),
+            )
+
+    def get_ai_explanation(self, explanation_id: str) -> Optional[AiExplanationRecord]:
+        """Retrieve a specific AI explanation by ID."""
+        row = self._conn.execute(
+            "SELECT * FROM ai_explanations WHERE explanation_id = ?",
+            (explanation_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_ai_explanation(row)
+
+    def list_ai_explanations(self, investigation_id: str, limit: int = 50) -> list[AiExplanationRecord]:
+        """List saved AI explanation audit records for an investigation."""
+        rows = self._conn.execute(
+            """
+            SELECT * FROM ai_explanations
+            WHERE investigation_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (investigation_id, limit),
+        ).fetchall()
+        return [self._row_to_ai_explanation(r) for r in rows]
+
+    def delete_ai_explanations(self, investigation_id: str) -> int:
+        """Delete all saved AI explanation records for an investigation."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM ai_explanations WHERE investigation_id = ?",
+                (investigation_id,),
+            )
+            return cursor.rowcount
+
+    def _row_to_ai_explanation(self, row: sqlite3.Row) -> AiExplanationRecord:
+        from .ai.models import AiExplanationRecord, ExplanationStatus
+        status_val = row["status"]
+        status_enum = ExplanationStatus.SUCCESS
+        for e in ExplanationStatus:
+            if e.value == status_val or e.name == status_val:
+                status_enum = e
+                break
+
+        return AiExplanationRecord(
+            explanation_id=row["explanation_id"],
+            investigation_id=row["investigation_id"],
+            provider_id=row["provider_id"],
+            model_id=row["model_id"],
+            api_version=row["api_version"],
+            prompt_template_version=row["prompt_template_version"],
+            question=row["question"],
+            context_hash=row["context_hash"],
+            evidence_ids=json.loads(row["evidence_ids_json"]),
+            is_remote=bool(row["is_remote"]),
+            user_confirmed_remote=bool(row["user_confirmed_remote"]),
+            status=status_enum,
+            short_answer=row["short_answer"],
+            structured_response=json.loads(row["structured_response_json"]),
+            duration_ms=row["duration_ms"],
+            created_at=row["created_at"],
         )

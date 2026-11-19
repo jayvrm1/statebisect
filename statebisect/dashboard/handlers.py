@@ -10,6 +10,8 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ..adapters.models import AdapterType
+from ..ai.mcp_tools import ReadOnlyMcpServer
+from ..ai.service import ExplanationService
 from ..correlation.engine import CorrelationEngine
 from ..correlation.models import CandidateReviewRecord, CandidateReviewStatus
 from ..models import ENGINE_VERSION, Investigation, InvestigationStatus, MinimizationResult, utc_now_iso
@@ -51,9 +53,11 @@ class ApiError(Exception):
 class DashboardApiRouter:
     """Dispatches HTTP requests to typed handler methods backed by StateBisect storage."""
 
-    def __init__(self, storage: Storage) -> None:
+    def __init__(self, storage: Storage, ai_service: Optional[ExplanationService] = None) -> None:
         self.storage = storage
         self.timeline_builder = TimelineBuilder(storage)
+        self.ai_service = ai_service or ExplanationService(storage)
+        self.mcp_server = ReadOnlyMcpServer(storage)
         self._lock = threading.Lock()
 
     def dispatch(
@@ -189,6 +193,64 @@ class DashboardApiRouter:
             if method == "GET" and path == "/api/monitoring-sessions":
                 data = self.list_monitoring_sessions(query_params)
                 return 200, data, headers
+
+            # 10. Phase 10 AI Explanation Layer Endpoints
+            if method == "GET" and path == "/api/ai/status":
+                p_id = query_params.get("provider", [None])[0]
+                data = self.ai_service.get_status(p_id)
+                return 200, data, headers
+
+            ai_preview_match = re.match(r"^/api/investigations/([^/]+)/ai/context-preview$", path)
+            if ai_preview_match:
+                inv_id = validate_id(ai_preview_match.group(1), "investigation_id")
+                if method == "GET":
+                    p_id = query_params.get("provider", [None])[0]
+                    preview = self.ai_service.get_context_preview(inv_id, p_id)
+                    return 200, preview.to_dict(), headers
+
+            ai_explain_match = re.match(r"^/api/investigations/([^/]+)/ai/explain$", path)
+            if ai_explain_match:
+                inv_id = validate_id(ai_explain_match.group(1), "investigation_id")
+                if method == "POST":
+                    body_map = body or {}
+                    question = (body_map.get("question") or "").strip()
+                    if not question:
+                        raise ApiError("Field 'question' is required.", status_code=400)
+                    p_id = body_map.get("provider")
+                    confirm_remote = bool(body_map.get("confirm_remote", False))
+                    resp = self.ai_service.explain(
+                        investigation_id=inv_id,
+                        question=question,
+                        provider_id=p_id,
+                        confirm_remote=confirm_remote,
+                    )
+                    return 200, resp.to_dict(), headers
+
+            ai_hist_match = re.match(r"^/api/investigations/([^/]+)/ai/history$", path)
+            if ai_hist_match:
+                inv_id = validate_id(ai_hist_match.group(1), "investigation_id")
+                if method == "GET":
+                    hist = self.ai_service.list_history(inv_id)
+                    return 200, {"investigation_id": inv_id, "total": len(hist), "history": hist}, headers
+                if method == "DELETE":
+                    del_count = self.ai_service.clear_history(inv_id)
+                    return 200, {"investigation_id": inv_id, "deleted_count": del_count}, headers
+
+            ai_fb_match = re.match(r"^/api/investigations/([^/]+)/ai/fallback-summary$", path)
+            if ai_fb_match:
+                inv_id = validate_id(ai_fb_match.group(1), "investigation_id")
+                if method == "POST":
+                    body_map = body or {}
+                    question = (body_map.get("question") or "Summary of investigation evidence").strip()
+                    resp = self.ai_service.generate_deterministic_fallback(
+                        inv_id, question, reason="User requested deterministic evidence summary."
+                    )
+                    return 200, resp.to_dict(), headers
+
+            # 11. Read-Only MCP Tool Endpoint
+            if method == "POST" and path == "/api/mcp":
+                mcp_resp = self.mcp_server.handle_json_rpc(body or {})
+                return 200, mcp_resp, headers
 
             raise ApiError(f"Route not found: {method} {path}", status_code=404, code="NOT_FOUND")
 

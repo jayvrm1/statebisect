@@ -389,8 +389,96 @@
 - Phase 9 dashboard CLI workflow verified end-to-end (`statebisect dashboard --help`).
 - Schema migrations from v1 through v8 verified with zero data loss.
 
-## Next Phase: Phase 10 — AI Explanation Layer & Synthesis
-- **Entry Criteria**: Phase 9 acceptance criteria met (local HTTP server and dashboard running on loopback, complete REST API endpoints, timeline view with post-onset consequence tagging, candidate review audit workflows, verification report downloads, zero external dependencies, 154 tests passing).
-- **Upcoming Deliverables**:
+## Next Phase: Phase 10 — AI Explanation Layer & Synthesis (Completed)
+- **Status**: Completed.
+- **Deliverables Delivered**:
   - Grounded AI explanation layer explaining verification findings without hallucinatory repair claims.
-  - Structured prompt contracts taking verified evidence sets and diagnostic matrices.
+  - Typed evidence contracts taking verified evidence sets and diagnostic matrices.
+
+## Phase 10 Implementation: Grounded AI Explanation Layer
+
+### Overview
+Phase 10 introduces an optional, evidence-grounded AI explanation layer that synthesizes saved investigation evidence, candidate change rankings, trial outcomes, and verification run records into human-readable causal narratives and safe next-step questions.
+
+Crucially, **the deterministic engine remains the sole authority** for all empirical findings, candidate scoring, trial executions, and verification verdicts. The AI layer is strictly an explanatory interpreter: it cannot declare verified causality without an engine verification run, cannot alter candidate scores, cannot execute commands or repairs, and cannot hide coverage gaps or uncertainty.
+
+### Architecture & Key Components
+1. **`statebisect/ai/models.py`**:
+   - `ProviderStatus`: Runtime health, readiness, and configured model for explanation providers.
+   - `DataClassification`: Strict data classification metadata (`CONFIDENTIAL`, `RESTRICTED`, `PUBLIC`).
+   - `EvidenceReference`: Formal citation contract tying claims to concrete evidence IDs (`ev-inv-*`, `ev-cand-*`, `ev-verif-*`, `ev-trial-*`, `ev-gap-*`).
+   - `EvidenceObservation`: Grounded observation with mandatory citation links to empirical evidence.
+   - `Hypothesis`: Plausible causal explanation with explicit plausibility tier (`HIGH`, `MEDIUM`, `LOW`, `SPECULATIVE`), required citations, counter-evidence, and testable differentiation steps.
+   - `ContextPreview`: Scrubbed and bounded data bundle showing exact tokens, size in bytes, and item counts before any remote transmission.
+   - `ExplanationResponse`: Structured AI explanation output with observations, hypotheses, coverage gaps, safe questions, and validator flags.
+   - `AiExplanationRecord`: Persistent audit record storing explanation runs, prompts, responses, provider IDs, context hashes, and timestamps.
+2. **`statebisect/ai/context.py` (`EvidenceContextBuilder`)**:
+   - **Secret Scrubbing**: Automatic redaction of credentials, API keys, passwords, and bearer tokens using `redact_sensitive_text`.
+   - **Size Bounding**: Enforces strict safety limits (max 30 candidates, 20 trials, 10 verifications, 25 coverage gaps).
+   - **Stable Evidence IDs**: Generates predictable citation targets (`ev-inv-<id>`, `ev-cand-<id>`, `ev-verif-<id>`, `ev-trial-<id>`, `ev-gap-<idx>`).
+   - **Context Hashing**: Computes deterministic SHA-256 fingerprint of the scrubbed context for cryptographic audit integrity.
+   - **Prompt Injection Defense**: Wraps untrusted user symptoms, logs, and notes within explicit XML-style boundary delimiters (`<EVIDENCE_DATA>`) per OWASP guidelines, instructing models to treat contained text solely as passive diagnostic data.
+3. **`statebisect/ai/validator.py` (`OutputValidator`)**:
+   - **Grounding Verification**: Validates all citations against context evidence IDs; flags or rejects hallucinated citations.
+   - **Causality Invariants**: Enforces that a hypothesis cannot claim verified root cause unless supported by an engine `VERIFIED_SET` verification run.
+   - **XSS Defense**: Sanitizes observations, hypotheses, and safe questions against script injection and unescaped HTML tags.
+4. **`statebisect/ai/service.py` (`ExplanationService`)**:
+   - **Gated Remote Consent**: Rejects calls to remote providers (e.g. OpenAI) unless `confirm_remote=True` is explicitly passed after user review of the context preview.
+   - **Deterministic Fallback Summary**: Generates 100% offline, deterministic heuristic summaries when AI is disabled, offline, or times out.
+   - **Audit Trail**: Persists all generated explanations and reviews into SQLite table `ai_explanations`.
+5. **`statebisect/ai/providers/`**:
+   - `base.py`: Provider ABC defining `generate_explanation`, `validate_credentials`, and `get_status`.
+   - `mock_provider.py`: Deterministic mock provider with adversarial test flags (`force_invalid_citations`, `force_malformed_json`, `force_timeout`, `force_refusal`).
+   - `openai_provider.py`: Zero-external-dependency implementation using Python 3.12 standard library `urllib.request`. Uses OpenAI Structured Outputs (`response_format: {"type": "json_schema", ...}`) with `gpt-4o-mini` (or `gpt-4o`), exponential backoff on HTTP 429, 30s timeout, and in-memory ephemeral key handling (`STATEBISECT_OPENAI_API_KEY`).
+6. **`statebisect/ai/mcp_tools.py` (`ReadOnlyMcpServer`)**:
+   - Implements standard Model Context Protocol (MCP) JSON-RPC 2.0 tool server exposing 4 read-only tools:
+     - `get_investigation_summary`: High-level symptom, status, and baseline metadata.
+     - `list_evidence_ids`: Available stable evidence IDs and summaries.
+     - `get_saved_report`: Rendered text investigation report.
+     - `get_candidate_or_verification`: Details for a specific candidate or verification run.
+   - Strict `readOnlyHint: true` annotation on all exposed tools; rejects any write or execution calls.
+7. **`statebisect/storage.py` & Schema Migration 9**:
+   - Updated `LATEST_SCHEMA_VERSION = 9`.
+   - Created `ai_explanations` table with columns: `id`, `investigation_id`, `created_at`, `provider_type`, `provider_model`, `user_question`, `context_hash`, `prompt_preview`, `raw_response_json`, `status`, `validation_flags_json`.
+   - Added index `idx_ai_explanations_inv` on `investigation_id`.
+   - Added persistence methods: `save_ai_explanation`, `get_ai_explanation`, `list_ai_explanations`, `delete_ai_explanations`.
+8. **Dashboard & API Integration**:
+   - Added REST endpoints: `GET /api/ai/status`, `GET /api/investigations/{id}/ai/context-preview`, `POST /api/investigations/{id}/ai/explain`, `GET/DELETE /api/investigations/{id}/ai/history`, `POST /api/investigations/{id}/ai/fallback-summary`, and `POST /api/mcp`.
+   - Added `do_DELETE` handler in `DashboardServer` with Host/Origin/CSRF validation.
+   - Added interactive "🤖 Ask AI Explainer" subtab in the dashboard UI with context preview drawer, remote consent confirmation checkbox, question input with quick suggestions, grounded observation cards with citation pills, hypotheses cards, and history management.
+9. **CLI Commands**:
+   - Added `ai-status`, `ai-context-preview`, `ai-explain`, `ai-history`, and `ai-clear-history` commands with human-readable table and JSON output formats.
+10. **Testing Suite (`tests/test_ai.py`)**:
+    - 14 comprehensive tests covering grounding validation, hypothesis invariants, prompt-injection defense, secret scrubbing, remote consent gating, MCP tool contracts, fallback summary generation, and static AST inspection verifying zero `return`/`break`/`continue` inside `finally` blocks.
+
+## Technology & Architecture Decisions (Phase 10)
+
+1. **Zero External Dependencies for LLM Integration**:
+   - **Decision**: Implemented `OpenAIExplanationProvider` directly using Python 3.12 standard library `urllib.request` and `json` rather than requiring the `openai` PyPI package.
+   - **Rationale**: Preserves StateBisect's core tenet of zero external dependencies. Eliminates transitive package bloat, supply-chain risks, and binary build requirements while leveraging OpenAI's native JSON Schema Structured Outputs.
+2. **Sole Authority Principle**:
+   - **Decision**: The AI layer cannot declare cause, alter scores, or run experiments. Causal claims require verification run backing (`VERIFIED_SET`).
+   - **Rationale**: LLMs are statistical generators susceptible to hallucination. Diagnostic integrity demands that causal assertions rest strictly on empirical delta debugging and verification experiments.
+3. **Explicit Consent & Redacted Previews**:
+   - **Decision**: Remote providers require explicit opt-in confirmation (`confirm_remote=True`). Users can inspect exact token counts, byte sizes, and redacted fields via context previews before data leaves their machine.
+   - **Rationale**: Prevents accidental leakage of proprietary system logs, registry keys, or environment data to third-party cloud APIs.
+4. **OWASP Prompt Injection Delimitation**:
+   - **Decision**: Embedded untrusted logs and system metadata inside `<EVIDENCE_DATA>` XML-style boundaries with strict system prompt directives.
+   - **Rationale**: Prevents malicious log payloads from overriding system rules or hijacking model instructions.
+5. **Strict Read-Only MCP Tool Contract**:
+   - **Decision**: Exposed Model Context Protocol (MCP) server implements only 4 read-only inspection tools with `readOnlyHint: true`.
+   - **Rationale**: Ensures AI agents or IDE assistants interacting via MCP can safely inspect StateBisect investigations without the capability to modify state, trigger unmonitored experiments, or execute commands.
+
+## Verification Results
+- All 172 unit and integration tests passing (`python -m unittest discover -s tests -v`).
+- Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
+- Phase 10 AI CLI workflows verified end-to-end (`statebisect ai-status`).
+- Schema migrations from v1 through v9 verified with zero data loss.
+
+## Next Phase: Phase 11 — Benchmarking, Release Hardening, & Distribution
+- **Entry Criteria**: Phase 10 acceptance criteria met (evidence-grounded AI explanation layer, OpenAI Structured Outputs via stdlib, deterministic mock provider, fallback summaries, schema migration 9, read-only MCP server, 172 tests passing).
+- **Upcoming Deliverables**:
+  - Reproducible benchmark suites measuring isolation overhead, search efficiency, and accuracy.
+  - Performance profiling and memory optimizations for long-running investigations.
+  - Final packaging, distribution artifacts, and release documentation.
+  - Strict preservation of the safety boundary: NO automatic live-system repairs.

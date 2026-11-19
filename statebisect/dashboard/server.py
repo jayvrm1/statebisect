@@ -180,6 +180,27 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.wfile.write(json.dumps(data, indent=2).encode("utf-8"))
 
+    def do_DELETE(self) -> None:
+        """Handle DELETE requests for API actions."""
+        if not self._validate_host_and_origin() or not self._validate_csrf():
+            return
+
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query_params = parse_qs(parsed.query)
+
+        status_code, data, headers = self.router.dispatch("DELETE", path, query_params, None)
+        self.send_response(status_code)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self._send_security_headers(content_type=headers.get("Content-Type", "application/json"), is_api=True)
+        self.end_headers()
+
+        if isinstance(data, str):
+            self.wfile.write(data.encode("utf-8"))
+        else:
+            self.wfile.write(json.dumps(data, indent=2).encode("utf-8"))
+
     def _serve_static(self, req_path: str) -> None:
         """Safely serve static files from STATIC_DIR, preventing path traversal."""
         if req_path in ("", "/"):
