@@ -1,7 +1,7 @@
 # StateBisect
 
-> **Notice: Verification, Reproduction, Differential Validation, and Evidence-Backed Findings**  
-> StateBisect is currently in a Phase 8 state. It features a rigorous 6-stage verification protocol, member-by-member necessity analysis, differential baseline validation, safe reversal checks, and evidence-backed finding generation. **No modifications are made to the host Windows registry, files, services, or system configuration.** Automated tests execute exclusively against in-memory simulation and test doubles. Real Hyper-V VM experiments require explicit user registration of disposable virtual machines, enforce strict non-host validation, and fall back safely to `UNAVAILABLE` without elevation. All findings apply solely to the specific tested environments, baselines, and health checks—never represented as claims of universal causality or automatic repair.
+> **Notice: Local Investigation API and Dashboard (Phase 9)**  
+> StateBisect is currently in a Phase 9 state. It features a strictly loopback-bound (`127.0.0.1` / `::1`) local investigation HTTP server, REST API, and single-page dashboard UI. **No modifications are made to the host Windows registry, files, services, or system configuration.** All experiments and verifications run exclusively against in-memory simulations or explicitly registered disposable environments. The API enforces strict DNS rebinding defense (`Host` header validation), origin verification, anti-CSRF request header checks, Content Security Policy (`default-src 'self'`), size-bounded JSON bodies, and sensitive data redaction. Zero execution endpoints exist: the dashboard cannot execute arbitrary commands, scripts, or live code against the host. All rankings represent experimental search priority for Delta Debugging, not proof of fault.
 
 ## 1. Product Mission
 
@@ -75,6 +75,16 @@ statebisect/
 │   │   ├── models.py        # Verdicts, roles, protocol configs, necessity details, run records
 │   │   ├── engine.py        # 6-stage VerificationEngine, dry-run preview, necessity analysis
 │   │   └── reporting.py     # Verification audit matrix and text/JSON formatters
+│   ├── dashboard/           # Local investigation API & dashboard (Phase 9)
+│   │   ├── __init__.py      # Dashboard exports (DashboardServer, run_dashboard)
+│   │   ├── server.py        # Loopback HTTP server (ThreadingHTTPServer, Host/Origin/CSRF validation)
+│   │   ├── handlers.py      # Typed REST API router & endpoint handlers
+│   │   ├── serializers.py   # Safe JSON serializers with size bounds & redaction
+│   │   ├── timeline.py      # Unified chronological timeline with post-onset consequence markers
+│   │   └── static/          # Single-Page Dashboard assets (HTML5/CSS3/ES2022)
+│   │       ├── index.html   # Semantic, accessible dashboard interface
+│   │       ├── style.css    # High-contrast responsive styling
+│   │       └── app.js       # Modern vanilla ES2022 dashboard controller
 │   ├── health_checks/       # Pluggable, versioned health-check system
 │   │   ├── base.py          # BaseHealthCheck, evidence bounding, and secret redaction
 │   │   ├── simulated_state.py # State condition matcher (key-value and compound)
@@ -88,6 +98,7 @@ statebisect/
 │   ├── storage.py           # SQLite persistence layer with schema migrations & evidence store
 │   └── reporting.py         # Diagnostic text and JSON report generators
 ├── tests/
+│   ├── test_dashboard.py    # Phase 9 dashboard API, security boundaries, and CSRF tests
 │   ├── test_verification.py # Phase 8 verification protocol, necessity, reversal, and CLI tests
 │   ├── test_adapters.py     # Phase 7 adapter lifecycle, runner, and Hyper-V safety tests
 │   ├── test_correlation.py  # Phase 6 candidate generation, ranking, and audit tests
@@ -388,11 +399,21 @@ python statebisect_cli.py inspect-verification <verification_run_id> --format js
 
 # 4. Export verification findings report
 python statebisect_cli.py export-verification <verification_run_id> -o verification_report.json --format json
+
+# --- Local Investigation API & Dashboard Commands (Phase 9) ---
+# 1. Start local dashboard on default loopback (http://127.0.0.1:8080) and open browser
+python statebisect_cli.py dashboard
+
+# 2. Start on custom loopback port without opening browser
+python statebisect_cli.py dashboard --port 8888 --no-browser
+
+# 3. Use custom database path with dashboard
+python statebisect_cli.py --db my_investigation.db dashboard
 ```
 
 ## 12. Running Tests and Demos
 
-### Run Full Test Suite (136 Tests Across 14 Modules)
+### Run Full Test Suite (154 Tests Across 15 Modules)
 ```powershell
 python -m unittest discover -s tests -v
 ```
@@ -413,4 +434,5 @@ python demo_phase1.py
 - [x] **Phase 6 — Candidate change generation & correlation engine**: Completed.
 - [x] **Phase 7 — Isolated trial runner & VM/Sandbox abstraction**: Completed.
 - [x] **Phase 8 — Verification, reproduction, and differential validation**: Completed.
-- [ ] **Phase 9 — Investigation Dashboard & Visualization**: Next phase.
+- [x] **Phase 9 — Investigation Dashboard & Visualization**: Completed.
+- [ ] **Phase 10 — AI Explanation Layer & Synthesis**: Next phase.

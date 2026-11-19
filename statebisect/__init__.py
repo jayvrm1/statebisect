@@ -107,6 +107,11 @@ from .verification import (
     format_verification_json,
     format_verification_text,
 )
+from .dashboard import (
+    DashboardApiRouter,
+    DashboardServer,
+    run_dashboard,
+)
 
 __version__ = ENGINE_VERSION
 __all__ = [
@@ -132,6 +137,8 @@ __all__ = [
     "CorrelationEngine",
     "CorrelationWindow",
     "CoverageGap",
+    "DashboardApiRouter",
+    "DashboardServer",
     "DeclarativeScenario",
     "DeltaDebugger",
     "DiffChangeType",
@@ -200,6 +207,7 @@ __all__ = [
     "generate_text_report",
     "load_scenario_file",
     "redact_sensitive_text",
+    "run_dashboard",
     "sanitize_and_bound_evidence",
     "validate_and_parse_scenario",
 ]

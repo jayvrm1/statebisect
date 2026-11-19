@@ -2013,6 +2013,32 @@ def cmd_export_verification(args: argparse.Namespace) -> int:
             storage.close()
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Launch the StateBisect local dashboard HTTP server."""
+    from .dashboard import run_dashboard
+    storage = None
+    try:
+        storage = get_storage(args.db, args.data_dir)
+        run_dashboard(
+            storage=storage,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_browser,
+        )
+        return 0
+    except ValueError as val_err:
+        print(f"Configuration Error: {val_err}", file=sys.stderr)
+        return 1
+    except Exception as err:
+        print(f"Dashboard Error: {err}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -2278,6 +2304,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_everif.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_everif.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # dashboard
+    p_dash = subparsers.add_parser("dashboard", help="Start the StateBisect local investigation dashboard.")
+    p_dash.add_argument("--host", default="127.0.0.1", help="Loopback host to bind (default: 127.0.0.1; only loopback is permitted).")
+    p_dash.add_argument("--port", type=int, default=8080, help="Port to listen on (default: 8080).")
+    p_dash.add_argument("--no-browser", action="store_true", help="Do not automatically open default web browser.")
+    p_dash.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_dash.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -2353,6 +2387,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_inspect_verification(args)
     elif args.command == "export-verification":
         return cmd_export_verification(args)
+    elif args.command == "dashboard":
+        return cmd_dashboard(args)
     else:
         parser.print_help()
         return 2

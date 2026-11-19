@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StateBisect — Local Investigation Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="brand-section">
+      <a href="#" class="brand-logo" id="brand-home-link" aria-label="StateBisect Dashboard Home">
+        <span class="logo-mark">SB</span>
+        <span>StateBisect</span>
+      </a>
+      <div class="env-banner" id="global-env-banner" role="status">
+        <span class="env-icon" aria-hidden="true">🔒</span>
+        <span>Loopback Mode (127.0.0.1) &bull; Zero Host Modifications</span>
+      </div>
+    </div>
+    <nav class="main-nav" role="tablist" aria-label="Primary Navigation">
+      <button class="nav-btn active" id="tab-nav-overview" role="tab" aria-selected="true" aria-controls="view-overview" tabindex="0">
+        Overview
+      </button>
+      <button class="nav-btn" id="tab-nav-investigations" role="tab" aria-selected="false" aria-controls="view-investigations" tabindex="-1">
+        Investigations
+      </button>
+      <button class="nav-btn" id="tab-nav-environments" role="tab" aria-selected="false" aria-controls="view-environments" tabindex="-1">
+        Environments &amp; Adapters
+      </button>
+    </nav>
+  </header>
+
+  <!-- Main Content Container -->
+  <main class="app-main" id="main-content" tabindex="-1">
+
+    <!-- Global Notice Box -->
+    <aside class="notice-box" role="region" aria-label="Investigation Safety Notice">
+      <div class="notice-icon" aria-hidden="true">ℹ️</div>
+      <div class="notice-content">
+        <p>
+          <strong>StateBisect Evidence Explorer:</strong> All findings are strictly grounded in deterministic experiment trials.
+          Absence of recent failure observations does <em>not</em> imply system health. Experiments run in isolated simulation or disposable VMs; host Windows settings are never altered.
+        </p>
+      </div>
+    </aside>
+
+    <!-- VIEW 1: OVERVIEW -->
+    <section id="view-overview" class="view-panel" role="tabpanel" aria-labelledby="tab-nav-overview">
+      <div class="stats-grid" id="overview-stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">Investigations</span>
+          <span class="stat-value" id="stat-investigations">-</span>
+          <span class="stat-desc">Active &amp; completed runs</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Collection Runs</span>
+          <span class="stat-value" id="stat-collections">-</span>
+          <span class="stat-desc">Read-only snapshots</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Monitoring Sessions</span>
+          <span class="stat-value" id="stat-monitoring">-</span>
+          <span class="stat-desc">Foreground telemetry</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Verification Runs</span>
+          <span class="stat-value" id="stat-verifications">-</span>
+          <span class="stat-desc">6-stage validated sets</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Active Coverage Gaps</span>
+          <span class="stat-value" id="stat-gaps">-</span>
+          <span class="stat-desc">Explicit uncertainty</span>
+        </div>
+      </div>
+
+      <!-- Overview Tables -->
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">
+            <span aria-hidden="true">🔍</span> Recent Investigations
+          </h2>
+          <button class="btn btn-primary btn-sm" id="btn-open-create-inv-modal">
+            + New Investigation
+          </button>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table" id="recent-investigations-table">
+            <thead>
+              <tr>
+                <th scope="col">ID</th>
+                <th scope="col">Target System</th>
+                <th scope="col">Symptom</th>
+                <th scope="col">Status</th>
+                <th scope="col">Created</th>
+                <th scope="col">Action</th>
+              </tr>
+            </thead>
+            <tbody id="recent-investigations-tbody">
+              <tr><td colspan="6" style="text-align:center; color:var(--text-muted);">Loading recent investigations...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Coverage Gaps & Environment Transparency Panel -->
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">
+            <span aria-hidden="true">⚠️</span> Active Coverage Gaps &amp; Uncertainties
+          </h2>
+        </div>
+        <div id="overview-coverage-gaps-container">
+          <p style="color:var(--text-muted); font-size:0.85rem;">No active telemetry gaps recorded.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 2: INVESTIGATIONS LIST -->
+    <section id="view-investigations" class="view-panel" role="tabpanel" aria-labelledby="tab-nav-investigations" style="display:none;">
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">Investigations Directory</h2>
+          <button class="btn btn-primary btn-sm" id="btn-open-create-inv-modal-2">
+            + New Investigation
+          </button>
+        </div>
+
+        <!-- Filter Bar -->
+        <div style="display:flex; gap:0.75rem; margin-bottom:1rem; flex-wrap:wrap;">
+          <input type="text" id="inv-search-input" class="form-input" style="flex:2; min-width:200px;" placeholder="Search by symptom, target system, or ID...">
+          <select id="inv-status-filter" class="form-select" style="flex:1; min-width:140px;" aria-label="Filter by Status">
+            <option value="ALL">All Statuses</option>
+            <option value="ACTIVE">ACTIVE</option>
+            <option value="VERIFIED">VERIFIED</option>
+            <option value="INCONCLUSIVE">INCONCLUSIVE</option>
+            <option value="COMPLETED">COMPLETED</option>
+          </select>
+          <button class="btn btn-secondary" id="btn-apply-inv-filters">Apply Filters</button>
+        </div>
+
+        <div class="table-responsive">
+          <table class="data-table" id="all-investigations-table">
+            <thead>
+              <tr>
+                <th scope="col">ID</th>
+                <th scope="col">Target System</th>
+                <th scope="col">Symptom</th>
+                <th scope="col">Status</th>
+                <th scope="col">Onset Time</th>
+                <th scope="col">Created</th>
+                <th scope="col">Action</th>
+              </tr>
+            </thead>
+            <tbody id="all-investigations-tbody">
+              <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">Loading investigations...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 3: INVESTIGATION DETAIL (WITH SUB-TABS) -->
+    <section id="view-investigation-detail" class="view-panel" style="display:none;">
+      <!-- Investigation Header Card -->
+      <div class="section-container" style="margin-bottom:1rem;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:1rem;">
+          <div>
+            <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.25rem;">
+              <button class="btn btn-secondary btn-sm" id="btn-back-to-investigations">&larr; Back to List</button>
+              <h2 class="section-title" id="detail-inv-id" style="margin:0;">INV-000</h2>
+              <span id="detail-inv-status-badge" class="badge badge-inconclusive">STATUS</span>
+            </div>
+            <p style="font-size:1.1rem; font-weight:600; color:var(--text-primary);" id="detail-inv-target">Target System</p>
+            <p style="font-size:0.9rem; color:var(--text-secondary);" id="detail-inv-symptom">Symptom description</p>
+          </div>
+          <div style="text-align:right;">
+            <p style="font-size:0.8rem; color:var(--text-muted);">Onset Time (Local):</p>
+            <p style="font-size:0.9rem; font-weight:600; color:var(--text-primary); font-family:var(--font-mono);" id="detail-inv-onset">-</p>
+            <p style="font-size:0.75rem; color:var(--text-muted);" id="detail-inv-utc-onset">UTC: -</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sub-Navigation Tabs for Investigation Details -->
+      <nav class="main-nav" role="tablist" aria-label="Investigation Views" style="margin-bottom:1rem; border-bottom:1px solid var(--border-color); padding-bottom:0.5rem;">
+        <button class="nav-btn active" id="subtab-timeline" role="tab" aria-selected="true" aria-controls="subview-timeline">Timeline</button>
+        <button class="nav-btn" id="subtab-candidates" role="tab" aria-selected="false" aria-controls="subview-candidates">Candidates &amp; Ranking</button>
+        <button class="nav-btn" id="subtab-trials" role="tab" aria-selected="false" aria-controls="subview-trials">Experiments &amp; Trials</button>
+        <button class="nav-btn" id="subtab-verification" role="tab" aria-selected="false" aria-controls="subview-verification">Verification Matrix</button>
+        <button class="nav-btn" id="subtab-report" role="tab" aria-selected="false" aria-controls="subview-report">Diagnostic Report</button>
+      </nav>
+
+      <!-- SUBVIEW A: TIMELINE -->
+      <div id="subview-timeline" class="subview-panel">
+        <div class="section-container">
+          <div class="section-header">
+            <h3 class="section-title">Investigation Timeline</h3>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <button class="btn btn-secondary btn-sm" id="btn-toggle-timeline-format">Switch to Table View</button>
+            </div>
+          </div>
+
+          <!-- Timeline Filters -->
+          <div style="display:flex; gap:0.75rem; margin-bottom:1rem; flex-wrap:wrap;" role="search" aria-label="Timeline Filters">
+            <select id="timeline-source-filter" class="form-select" style="flex:1; min-width:130px;" aria-label="Filter Source">
+              <option value="ALL">All Sources</option>
+              <option value="collector">Collector (Snapshots)</option>
+              <option value="monitor">Monitor (Telemetry)</option>
+              <option value="correlation">Candidate Generation</option>
+              <option value="trial_runner">Experiment Trials</option>
+              <option value="verification">Verification</option>
+              <option value="investigation">Investigation</option>
+            </select>
+            <select id="timeline-outcome-filter" class="form-select" style="flex:1; min-width:130px;" aria-label="Filter Outcome">
+              <option value="ALL">All Outcomes</option>
+              <option value="PASS">PASS</option>
+              <option value="FAIL">FAIL</option>
+              <option value="INCONCLUSIVE">INCONCLUSIVE</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" id="btn-apply-timeline-filters">Filter Timeline</button>
+          </div>
+
+          <!-- Visual Timeline Container -->
+          <div id="timeline-visual-container" class="timeline-list">
+            <!-- Timeline items injected here -->
+          </div>
+
+          <!-- Accessible Table Alternative (Hidden by default) -->
+          <div id="timeline-table-container" style="display:none;" class="table-responsive">
+            <table class="data-table" id="timeline-accessible-table">
+              <thead>
+                <tr>
+                  <th scope="col">Timestamp (Local)</th>
+                  <th scope="col">Source</th>
+                  <th scope="col">Provenance</th>
+                  <th scope="col">Event Title</th>
+                  <th scope="col">Outcome</th>
+                  <th scope="col">Post-Onset?</th>
+                </tr>
+              </thead>
+              <tbody id="timeline-accessible-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBVIEW B: CANDIDATES & RANKING -->
+      <div id="subview-candidates" class="subview-panel" style="display:none;">
+        <div class="section-container">
+          <aside class="notice-box warning" role="region" aria-label="Ranking Disclaimer">
+            <div class="notice-icon" aria-hidden="true">⚠️</div>
+            <div class="notice-content">
+              <p>
+                <strong>Experimental Priority Only:</strong> Candidate ranking determines the order of Delta Debugging experiment trials.
+                Scores and ranks are <strong>never</strong> presented as mathematical proof or causal probabilities.
+              </p>
+            </div>
+          </aside>
+
+          <div class="section-header">
+            <h3 class="section-title">Candidate Changes</h3>
+            <button class="btn btn-secondary btn-sm" id="btn-open-gen-candidates-modal">+ Generate from Telemetry</button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table" id="candidates-data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Rank</th>
+                  <th scope="col">Candidate ID</th>
+                  <th scope="col">Component / Key</th>
+                  <th scope="col">Score</th>
+                  <th scope="col">Evidence Type</th>
+                  <th scope="col">Provenance</th>
+                  <th scope="col">Review</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="candidates-tbody">
+                <tr><td colspan="8" style="text-align:center; color:var(--text-muted);">No candidates generated yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBVIEW C: EXPERIMENTS & TRIALS -->
+      <div id="subview-trials" class="subview-panel" style="display:none;">
+        <div class="section-container">
+          <div class="section-header">
+            <h3 class="section-title">Isolated Experiment Trials</h3>
+            <span class="badge badge-simulation">Simulation / Isolated Runner</span>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table" id="trials-data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Trial ID</th>
+                  <th scope="col">Environment</th>
+                  <th scope="col">Selected Changes</th>
+                  <th scope="col">Health Outcome</th>
+                  <th scope="col">Attempts</th>
+                  <th scope="col">Duration</th>
+                  <th scope="col">Baseline Restore</th>
+                </tr>
+              </thead>
+              <tbody id="trials-tbody">
+                <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No trials recorded for this investigation.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBVIEW D: VERIFICATION MATRIX -->
+      <div id="subview-verification" class="subview-panel" style="display:none;">
+        <div class="section-container">
+          <div class="section-header">
+            <h3 class="section-title">Verification &amp; Reproduction Runs</h3>
+          </div>
+          <div id="verification-runs-container">
+            <p style="color:var(--text-muted);">No Phase 8 verification runs recorded for this investigation.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBVIEW E: DIAGNOSTIC REPORT -->
+      <div id="subview-report" class="subview-panel" style="display:none;">
+        <div class="section-container">
+          <div class="section-header">
+            <h3 class="section-title">Diagnostic Audit Report</h3>
+            <div style="display:flex; gap:0.5rem;">
+              <button class="btn btn-secondary btn-sm" id="btn-report-view-text">Text View</button>
+              <button class="btn btn-secondary btn-sm" id="btn-report-view-json">JSON View</button>
+              <button class="btn btn-primary btn-sm" id="btn-download-report-txt">Download Text</button>
+              <button class="btn btn-primary btn-sm" id="btn-download-report-json">Download JSON</button>
+            </div>
+          </div>
+          <pre class="report-box" id="diagnostic-report-content">Generating report...</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 4: ENVIRONMENTS & ADAPTERS -->
+    <section id="view-environments" class="view-panel" role="tabpanel" aria-labelledby="tab-nav-environments" style="display:none;">
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">Registered Experiment Environments</h2>
+        </div>
+        <aside class="notice-box" role="region" aria-label="Environment Safety Guard">
+          <div class="notice-icon" aria-hidden="true">🛡️</div>
+          <div class="notice-content">
+            <p>
+              <strong>Isolation Boundary Guarantee:</strong> StateBisect strictly refuses to execute candidate change trials directly against the host machine.
+              Simulations run purely in-memory. Virtual Machine experiments require explicit registration of disposable Hyper-V guests.
+            </p>
+          </div>
+        </aside>
+
+        <div class="table-responsive">
+          <table class="data-table" id="environments-table">
+            <thead>
+              <tr>
+                <th scope="col">Environment ID</th>
+                <th scope="col">Name</th>
+                <th scope="col">Type</th>
+                <th scope="col">Isolation Mode</th>
+                <th scope="col">Status</th>
+                <th scope="col">Baselines</th>
+              </tr>
+            </thead>
+            <tbody id="environments-tbody">
+              <tr><td colspan="6" style="text-align:center; color:var(--text-muted);">Loading environments...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- MODAL: CREATE INVESTIGATION -->
+  <div id="modal-create-investigation" class="modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="modal-title-create-inv">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title-create-inv" class="section-title">Create New Investigation</h3>
+        <button class="btn btn-secondary btn-sm" id="btn-close-create-inv-modal" aria-label="Close dialog">&times;</button>
+      </div>
+      <form id="form-create-investigation">
+        <div class="form-group">
+          <label for="input-target-system" class="form-label">Target Application / System *</label>
+          <input type="text" id="input-target-system" class="form-input" required placeholder="e.g. PaymentGatewayService or PostgresApp">
+        </div>
+        <div class="form-group">
+          <label for="input-symptom" class="form-label">Symptom Description *</label>
+          <textarea id="input-symptom" class="form-textarea" required placeholder="Describe the failure, error message, or observed defect..."></textarea>
+        </div>
+        <div class="form-group">
+          <label for="input-onset-time" class="form-label">Symptom Onset Time (Optional, ISO or Local)</label>
+          <input type="text" id="input-onset-time" class="form-input" placeholder="e.g. 2026-03-30 14:00:00 or ISO 8601">
+        </div>
+        <div class="form-group">
+          <label for="input-baseline-id" class="form-label">Clean Baseline ID</label>
+          <input type="text" id="input-baseline-id" class="form-input" value="baseline-001">
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.5rem;">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-create-inv">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-create-inv">Create Investigation</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CANDIDATE REVIEW (INCLUDE/EXCLUDE) -->
+  <div id="modal-candidate-review" class="modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="modal-title-cand-review">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title-cand-review" class="section-title">Audit Candidate Review</h3>
+        <button class="btn btn-secondary btn-sm" id="btn-close-cand-review-modal" aria-label="Close dialog">&times;</button>
+      </div>
+      <form id="form-candidate-review">
+        <input type="hidden" id="review-candidate-id">
+        <div class="form-group">
+          <p style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:0.5rem;">
+            Candidate: <strong id="review-candidate-label" style="color:var(--text-primary); font-family:var(--font-mono);">-</strong>
+          </p>
+        </div>
+        <div class="form-group">
+          <label for="select-review-action" class="form-label">Review Action *</label>
+          <select id="select-review-action" class="form-select">
+            <option value="include">Include Candidate (Active in Experiments)</option>
+            <option value="exclude">Exclude Candidate (Deactivate with Justification)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="input-review-reason" class="form-label">Audit Reason / Justification *</label>
+          <textarea id="input-review-reason" class="form-textarea" required placeholder="Mandatory reason for audit trail (e.g. 'Verified routine AV update unrelated to network')..."></textarea>
+        </div>
+        <div class="form-group">
+          <label for="input-reviewer-name" class="form-label">Reviewer ID</label>
+          <input type="text" id="input-reviewer-name" class="form-input" value="operator">
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.5rem;">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-cand-review">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-cand-review">Save Review</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: GENERATE CANDIDATES -->
+  <div id="modal-generate-candidates" class="modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="modal-title-gen-cand">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title-gen-cand" class="section-title">Generate Candidates from Telemetry</h3>
+        <button class="btn btn-secondary btn-sm" id="btn-close-gen-cand-modal" aria-label="Close dialog">&times;</button>
+      </div>
+      <form id="form-generate-candidates">
+        <div class="form-group">
+          <label for="input-gen-before-run" class="form-label">Pre-Change Snapshot Run ID (Optional)</label>
+          <input type="text" id="input-gen-before-run" class="form-input" placeholder="e.g. col-run-001">
+        </div>
+        <div class="form-group">
+          <label for="input-gen-after-run" class="form-label">Post-Change Snapshot Run ID (Optional)</label>
+          <input type="text" id="input-gen-after-run" class="form-input" placeholder="e.g. col-run-002">
+        </div>
+        <div class="form-group">
+          <label for="input-gen-monitor-sess" class="form-label">Monitoring Session ID (Optional)</label>
+          <input type="text" id="input-gen-monitor-sess" class="form-input" placeholder="e.g. mon-sess-001">
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.5rem;">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-gen-cand">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-gen-cand">Generate Candidates</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer class="app-footer">
+    <p>
+      StateBisect Core &bull; Local Diagnosis &amp; Investigation Platform &bull; Bounded to Loopback &bull; Zero Host Mutations
+    </p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

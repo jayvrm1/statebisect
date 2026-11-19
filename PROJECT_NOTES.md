@@ -314,7 +314,83 @@
 - Phase 8 CLI workflow verified end-to-end (`preview-verification`, `run-verification`, `inspect-verification`, `export-verification`).
 - Schema migrations from v1 through v8 verified with zero data loss.
 
-## Next Phase: Phase 9 — Investigation Dashboard & Visualization
-- **Entry Criteria**: Phase 8 acceptance criteria met (6-stage verification protocol, member-by-member necessity analysis, differential baseline testing, safe reversal checks, evidence-backed verdicts and audit matrices, Schema Version 8 migrations, 136 tests passing).
+## Phase 9: Local Investigation API and Dashboard
+
+- **Date**: March 2026
+- **Status**: Complete
+- **Components Implemented**:
+  - `statebisect/dashboard/server.py`:
+    - Loopback-only HTTP server built on Python standard library `http.server.ThreadingHTTPServer` with daemon request threads.
+    - Security Boundaries:
+      - Strictly binds to `127.0.0.1` or `::1`; rejects any attempt to bind to `0.0.0.0` or external network interfaces with `ValueError`.
+      - DNS Rebinding Defense: Validates `Host` header against loopback origins (`127.0.0.1`, `localhost`, `::1`).
+      - Untrusted Origin Defense: Rejects cross-origin `Origin` headers from non-loopback domains with HTTP 403 Forbidden.
+      - Anti-CSRF Custom Header: Requires `X-StateBisect-Request: 1` or `X-Requested-With` on all state-changing methods (`POST`, `PUT`, `DELETE`).
+      - Defensive Headers: Injects `Content-Security-Policy: default-src 'self' ...`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, and `Cache-Control: no-store`.
+      - Body Size Limits: Limits request bodies to `MAX_BODY_BYTES = 1_048_576` (1 MB) to prevent denial-of-service / memory exhaustion.
+      - Path Traversal Defense: Verifies resolved file paths remain strictly inside `static/` directory using `os.path.commonpath`.
+  - `statebisect/dashboard/handlers.py`:
+    - `DashboardApiRouter` with synchronized `_lock = threading.Lock()` around dispatch to ensure serialized, thread-safe SQLite access.
+    - Endpoints:
+      - `GET /api/overview`: System status, active counts, recent collection/monitoring runs, and transparency disclaimers.
+      - `GET /api/environments`: Registered environments and baselines with simulation vs. physical guest badges.
+      - `GET /api/investigations`: List investigations with query filtering.
+      - `POST /api/investigations`: Create new investigation with validated parameters.
+      - `GET /api/investigations/{id}`: Detailed investigation record.
+      - `GET /api/investigations/{id}/timeline`: Unified chronological timeline with post-onset consequence tagging.
+      - `GET /api/investigations/{id}/candidates`: Ranked candidate changes with explicit disclaimer and score breakdowns.
+      - `GET /api/candidates/{id}`: Candidate details and immutable review history.
+      - `POST /api/candidates/{id}/review`: Audited user review (`include` or `exclude` with mandatory audit reason). Updates active status to prevent silent inclusion in Delta Debugging.
+      - `POST /api/investigations/{id}/generate-candidates`: Safe candidate generation from telemetry diffs and monitoring sessions.
+      - `GET /api/investigations/{id}/trials`: Isolated trial history and lifecycle states.
+      - `GET /api/investigations/{id}/verifications`: Verification runs, necessity details, and differential validation findings.
+      - `GET /api/verification/{id}`: Detailed verification audit record.
+      - `GET /api/investigations/{id}/report`: Formatted diagnostic report preview (text or JSON).
+      - `GET /api/investigations/{id}/report/download`: Downloadable attachment (`Content-Disposition: attachment; filename=...`).
+      - `GET /api/collections`: Telemetry collection history.
+      - `GET /api/monitoring-sessions`: Live monitoring session history.
+  - `statebisect/dashboard/serializers.py`:
+    - Safe JSON serialization scrubbing sensitive credentials, tokens, and passwords using `safe_redact`.
+    - Bounds string lengths and collection sizes to protect against memory bloat.
+  - `statebisect/dashboard/timeline.py`:
+    - `TimelineBuilder` synthesizing unified chronological timelines from symptom onset, snapshot diffs, monitoring events, candidates, reviews, trials, and verifications.
+    - Post-onset tagging (`is_post_onset = True` when event timestamp > onset time) to clearly flag crash consequences vs. potential root causes.
+  - `statebisect/dashboard/static/`:
+    - Single-Page Dashboard built with semantic HTML5, accessible ARIA attributes, responsive CSS variables, and vanilla ES2022 JavaScript.
+    - Zero external dependencies: no third-party CDNs, npm packages, or external trackers.
+    - Real-time views: Overview, Investigations, Detail Workspace (Timeline, Ranked Candidates, Isolated Trials, Verification Runs, Reports), and Environments.
+  - `statebisect/storage.py`:
+    - Updated `Storage.__init__` to support `check_same_thread=False` with synchronized application locking.
+  - `statebisect/cli.py`:
+    - Added `cmd_dashboard` and `dashboard` CLI parser (`statebisect dashboard [--host 127.0.0.1] [--port 8080] [--no-browser]`).
+  - `tests/test_dashboard.py`:
+    - 18 comprehensive tests covering loopback binding, Host/Origin/CSRF validation, path traversal defense, payload size limits, endpoints, candidate review audit trails, report downloads, and exception handling without `finally` control flow.
+
+## Technology & Architecture Decisions (Phase 9)
+
+1. **Standard Library `ThreadingHTTPServer` over Third-Party Frameworks**:
+   - **Decision**: Implemented dashboard HTTP server using Python 3.12 `http.server.ThreadingHTTPServer` without pulling in Flask, FastAPI, Starlette, or Uvicorn.
+   - **Rationale**: StateBisect adheres strictly to the rule avoiding unnecessary dependencies. Python's built-in `ThreadingHTTPServer` provides complete HTTP/1.1 serving, daemon thread pooling, and header customization with zero external supply-chain risk and zero third-party license obligations.
+2. **Strict Loopback Binding & Defense-in-Depth Local Security**:
+   - **Decision**: Server binds exclusively to `127.0.0.1` or `::1`. Enforces RFC 2616 Host validation, CORS loopback verification, anti-CSRF custom headers (`X-StateBisect-Request: 1`), and strict CSP (`default-src 'self'`).
+   - **Rationale**: Local web dashboards on developer workstations are vulnerable to DNS rebinding and cross-site scripting/form submission attacks from malicious browser tabs. By requiring custom headers and strict loopback origins, cross-origin web pages cannot query or trigger actions on the local StateBisect API.
+3. **Zero Host Execution Endpoints**:
+   - **Decision**: The dashboard API contains zero endpoints for arbitrary shell, powershell, python, SQL, or command execution against the host machine.
+   - **Safety Boundary**: The dashboard is an investigation viewer and controller for isolated simulations/guests only. It never executes live code on the host Windows environment.
+4. **Transparent Disclaimer on Candidate Ranking**:
+   - **Decision**: The candidate API and dashboard UI prominently display: *"Ranking reflects experimental priority for Delta Debugging, NOT proof or probability of fault."*
+   - **Rationale**: Prevents users from misinterpreting algorithmic candidate order as an AI diagnosis or guaranteed cause prior to empirical verification.
+5. **Mandatory Exception-Handling Rule in Cleanup**:
+   - **Decision**: Maintained strict adherence to the project rule prohibiting `return`, `break`, or `continue` inside any `finally` block; used `finally` exclusively for server socket closing and cleanup.
+
+## Verification Results
+- All 154 unit and integration tests passing (`python -m unittest discover -s tests -v`).
+- Phase 1 programmatic demonstration script runs and passes (`python demo_phase1.py`).
+- Phase 9 dashboard CLI workflow verified end-to-end (`statebisect dashboard --help`).
+- Schema migrations from v1 through v8 verified with zero data loss.
+
+## Next Phase: Phase 10 — AI Explanation Layer & Synthesis
+- **Entry Criteria**: Phase 9 acceptance criteria met (local HTTP server and dashboard running on loopback, complete REST API endpoints, timeline view with post-onset consequence tagging, candidate review audit workflows, verification report downloads, zero external dependencies, 154 tests passing).
 - **Upcoming Deliverables**:
-  - Investigation Dashboard and visualization of configuration differences, candidate timelines, trial execution trees, and verification audit matrices.
+  - Grounded AI explanation layer explaining verification findings without hallucinatory repair claims.
+  - Structured prompt contracts taking verified evidence sets and diagnostic matrices.

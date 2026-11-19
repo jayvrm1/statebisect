@@ -63,9 +63,9 @@ LATEST_SCHEMA_VERSION = 8
 class Storage:
     """Manages SQLite storage, migrations, audit logging, and snapshots for StateBisect."""
 
-    def __init__(self, db_path: str | Path = ":memory:") -> None:
+    def __init__(self, db_path: str | Path = ":memory:", check_same_thread: bool = False) -> None:
         self.db_path = str(db_path)
-        self._conn = sqlite3.connect(self.db_path)
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=check_same_thread)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON;")
         self._apply_migrations()
