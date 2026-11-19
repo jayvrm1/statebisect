@@ -21,11 +21,12 @@ MAX_EVIDENCE_LENGTH = 4096
 
 # Regex patterns for redacting sensitive values like tokens, passwords, and keys
 SECRET_PATTERNS = [
-    re.compile(r"(password\s*[:=]\s*)([^\s,;&\"']+)", re.IGNORECASE),
-    re.compile(r"(token\s*[:=]\s*)([^\s,;&\"']+)", re.IGNORECASE),
-    re.compile(r"(api[_-]?key\s*[:=]\s*)([^\s,;&\"']+)", re.IGNORECASE),
+    re.compile(r"(password\s*[:=]\s*['\"]?)([^'\";\s,\r\n]+)(['\"]?)", re.IGNORECASE),
+    re.compile(r"(token\s*[:=]\s*['\"]?)([^'\";\s,\r\n]+)(['\"]?)", re.IGNORECASE),
+    re.compile(r"(api[_-]?key\s*[:=]\s*['\"]?)([^'\";\s,\r\n]+)(['\"]?)", re.IGNORECASE),
     re.compile(r"(bearer\s+)([a-zA-Z0-9_\-\.]+)", re.IGNORECASE),
-    re.compile(r"(secret\s*[:=]\s*)([^\s,;&\"']+)", re.IGNORECASE),
+    re.compile(r"(secret\s*[:=]\s*['\"]?)([^'\";\s,\r\n]+)(['\"]?)", re.IGNORECASE),
+    re.compile(r"(sk-[a-zA-Z0-9_\-]{20,})", re.IGNORECASE),
 ]
 
 
@@ -35,7 +36,12 @@ def redact_sensitive_text(text: str) -> tuple[str, bool]:
     was_redacted = False
     for pat in SECRET_PATTERNS:
         if pat.search(redacted):
-            redacted = pat.sub(r"\1[REDACTED]", redacted)
+            if pat.groups >= 3:
+                redacted = pat.sub(r"\1[REDACTED]\3", redacted)
+            elif pat.groups >= 2:
+                redacted = pat.sub(r"\1[REDACTED]", redacted)
+            else:
+                redacted = pat.sub("[REDACTED]", redacted)
             was_redacted = True
     return redacted, was_redacted
 

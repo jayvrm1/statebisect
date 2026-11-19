@@ -53,8 +53,8 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
         """Enforce Host and Origin header validation to defend against DNS rebinding and cross-site attacks."""
         host = self.headers.get("Host", "")
         # Host can include port e.g. 127.0.0.1:8080
-        host_name = host.split(":")[0].strip("[]")
-        if not any(host_name == h or host_name.endswith(f".{h}") for h in ("127.0.0.1", "localhost", "::1")):
+        host_name = host.split(":")[0].strip("[]").lower()
+        if host_name not in ("127.0.0.1", "localhost", "::1") and not host_name.endswith(".localhost"):
             self.send_response(400)
             self._send_security_headers()
             self.end_headers()

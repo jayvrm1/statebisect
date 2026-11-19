@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .ai.models import AiExplanationRecord
+    from .benchmark.models import BenchmarkRunRecord
 
 from .collector.models import (
     CollectionRun,
@@ -60,7 +61,7 @@ from .monitor.models import (
     ProcessProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 
 
 class Storage:
@@ -640,6 +641,63 @@ class Storage:
                     """
                 )
                 current_ver = 9
+
+            # Migration 10: Phase 11 Reproducible Benchmark Runs & Results
+            if current_ver < 10:
+                self._conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS benchmark_runs (
+                        run_id TEXT PRIMARY KEY,
+                        suite_id TEXT NOT NULL,
+                        suite_version TEXT NOT NULL,
+                        suite_hash TEXT NOT NULL,
+                        engine_version TEXT NOT NULL,
+                        adapter_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        is_disposable_vm INTEGER NOT NULL,
+                        total_scenarios INTEGER NOT NULL,
+                        exact_matches INTEGER NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        summary_json TEXT NOT NULL,
+                        configuration_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS benchmark_results (
+                        result_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        scenario_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        adapter_type TEXT NOT NULL,
+                        verdict_observed TEXT NOT NULL,
+                        expected_classification TEXT NOT NULL,
+                        ground_truth_causes_json TEXT NOT NULL,
+                        reported_causes_json TEXT NOT NULL,
+                        exact_match INTEGER NOT NULL,
+                        precision REAL NOT NULL,
+                        recall REAL NOT NULL,
+                        is_1_minimal INTEGER NOT NULL,
+                        bystanders_rejected INTEGER NOT NULL,
+                        trials_count INTEGER NOT NULL,
+                        duration_ms REAL NOT NULL,
+                        baseline_restored_cleanly INTEGER NOT NULL,
+                        cleanup_succeeded INTEGER NOT NULL,
+                        flaky_detected INTEGER NOT NULL,
+                        inconclusive_reason TEXT,
+                        notes TEXT NOT NULL,
+                        raw_result_json TEXT NOT NULL,
+                        FOREIGN KEY (run_id) REFERENCES benchmark_runs(run_id) ON DELETE CASCADE
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_benchmark_results_run
+                    ON benchmark_results(run_id);
+
+                    INSERT INTO schema_migrations (version, applied_at, description)
+                    VALUES (10, datetime('now'), 'Add Phase 11 benchmark run records, metrics summary, and scenario results');
+                    """
+                )
+                current_ver = 10
 
     def log_audit(
         self,
@@ -2042,4 +2100,204 @@ class Storage:
             structured_response=json.loads(row["structured_response_json"]),
             duration_ms=row["duration_ms"],
             created_at=row["created_at"],
+        )
+
+    # ========================================================================
+    # Benchmark Persistence Methods (Phase 11)
+    # ========================================================================
+
+    def save_benchmark_run(self, run: BenchmarkRunRecord) -> None:
+        """Persist a complete benchmark run record and scenario results in SQLite."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO benchmark_runs (
+                    run_id, suite_id, suite_version, suite_hash, engine_version,
+                    adapter_type, status, is_disposable_vm, total_scenarios,
+                    exact_matches, duration_ms, summary_json, configuration_json,
+                    created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.run_id,
+                    run.suite_id,
+                    run.suite_version,
+                    run.suite_hash,
+                    run.engine_version,
+                    run.adapter_type,
+                    run.status,
+                    1 if run.is_disposable_vm else 0,
+                    run.summary.total_scenarios,
+                    run.summary.exact_set_accuracy.numerator,
+                    run.summary.total_duration_ms,
+                    json.dumps(run.summary.to_dict()),
+                    json.dumps(run.configuration),
+                    run.created_at,
+                    run.completed_at,
+                ),
+            )
+
+            for r in run.scenario_results:
+                res_id = f"b-res-{uuid.uuid4().hex[:12]}"
+                self._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO benchmark_results (
+                        result_id, run_id, scenario_id, category, adapter_type,
+                        verdict_observed, expected_classification,
+                        ground_truth_causes_json, reported_causes_json,
+                        exact_match, precision, recall, is_1_minimal,
+                        bystanders_rejected, trials_count, duration_ms,
+                        baseline_restored_cleanly, cleanup_succeeded,
+                        flaky_detected, inconclusive_reason, notes, raw_result_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        res_id,
+                        run.run_id,
+                        r.scenario_id,
+                        r.category.value if hasattr(r.category, "value") else str(r.category),
+                        r.adapter_type,
+                        r.verdict_observed,
+                        r.expected_classification,
+                        json.dumps(r.ground_truth_causes),
+                        json.dumps(r.reported_causes),
+                        1 if r.exact_match else 0,
+                        r.precision,
+                        r.recall,
+                        1 if r.is_1_minimal else 0,
+                        1 if r.bystanders_rejected else 0,
+                        r.trials_count,
+                        r.duration_ms,
+                        1 if r.baseline_restored_cleanly else 0,
+                        1 if r.cleanup_succeeded else 0,
+                        1 if r.flaky_detected else 0,
+                        r.inconclusive_reason,
+                        r.notes,
+                        json.dumps(r.raw_result),
+                    ),
+                )
+
+    def get_benchmark_run(self, run_id: str) -> BenchmarkRunRecord | None:
+        """Retrieve a benchmark run by ID including its scenario results."""
+        row = self._conn.execute(
+            "SELECT * FROM benchmark_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_benchmark_run(row)
+
+    def list_benchmark_runs(self, limit: int = 50) -> list[BenchmarkRunRecord]:
+        """List benchmark runs in reverse chronological order."""
+        rows = self._conn.execute(
+            "SELECT * FROM benchmark_runs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._row_to_benchmark_run(r) for r in rows]
+
+    def delete_benchmark_run(self, run_id: str) -> bool:
+        """Delete a benchmark run and cascade to its scenario results."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM benchmark_runs WHERE run_id = ?",
+                (run_id,),
+            )
+            return cursor.rowcount > 0
+
+    def _row_to_benchmark_run(self, row: sqlite3.Row) -> BenchmarkRunRecord:
+        from .benchmark.models import (
+            BenchmarkCategory,
+            BenchmarkMetricsSummary,
+            BenchmarkRunRecord,
+            MetricFraction,
+            ScenarioExecutionResult,
+        )
+
+        run_id = row["run_id"]
+        res_rows = self._conn.execute(
+            "SELECT * FROM benchmark_results WHERE run_id = ? ORDER BY scenario_id",
+            (run_id,),
+        ).fetchall()
+
+        scenario_results: list[ScenarioExecutionResult] = []
+        for r_row in res_rows:
+            cat_val = r_row["category"]
+            cat_enum = BenchmarkCategory.SINGLE_CAUSE
+            for c in BenchmarkCategory:
+                if c.value == cat_val or c.name == cat_val:
+                    cat_enum = c
+                    break
+
+            scenario_results.append(
+                ScenarioExecutionResult(
+                    scenario_id=r_row["scenario_id"],
+                    category=cat_enum,
+                    adapter_type=r_row["adapter_type"],
+                    verdict_observed=r_row["verdict_observed"],
+                    expected_classification=r_row["expected_classification"],
+                    ground_truth_causes=json.loads(r_row["ground_truth_causes_json"]),
+                    reported_causes=json.loads(r_row["reported_causes_json"]),
+                    exact_match=bool(r_row["exact_match"]),
+                    precision=r_row["precision"],
+                    recall=r_row["recall"],
+                    is_1_minimal=bool(r_row["is_1_minimal"]),
+                    bystanders_rejected=bool(r_row["bystanders_rejected"]),
+                    trials_count=r_row["trials_count"],
+                    duration_ms=r_row["duration_ms"],
+                    baseline_restored_cleanly=bool(r_row["baseline_restored_cleanly"]),
+                    cleanup_succeeded=bool(r_row["cleanup_succeeded"]),
+                    flaky_detected=bool(r_row["flaky_detected"]),
+                    inconclusive_reason=r_row["inconclusive_reason"],
+                    notes=r_row["notes"],
+                    raw_result=json.loads(r_row["raw_result_json"]),
+                )
+            )
+
+        summary_dict = json.loads(row["summary_json"])
+
+        def _to_frac(d: dict[str, Any] | None) -> MetricFraction:
+            if not d:
+                return MetricFraction(0, 0, 0.0)
+            return MetricFraction(
+                numerator=d.get("numerator", 0),
+                denominator=d.get("denominator", 0),
+                percentage=d.get("percentage", 0.0),
+                description=d.get("description", ""),
+            )
+
+        summary = BenchmarkMetricsSummary(
+            total_scenarios=summary_dict.get("total_scenarios", len(scenario_results)),
+            exact_set_accuracy=_to_frac(summary_dict.get("exact_set_accuracy")),
+            element_precision=_to_frac(summary_dict.get("element_precision")),
+            element_recall=_to_frac(summary_dict.get("element_recall")),
+            one_minimality_rate=_to_frac(summary_dict.get("one_minimality_rate")),
+            interaction_recognition_rate=_to_frac(summary_dict.get("interaction_recognition_rate")),
+            bystander_rejection_rate=_to_frac(summary_dict.get("bystander_rejection_rate")),
+            false_attribution_rate=_to_frac(summary_dict.get("false_attribution_rate")),
+            inconclusive_correctness_rate=_to_frac(summary_dict.get("inconclusive_correctness_rate")),
+            baseline_integrity_rate=_to_frac(summary_dict.get("baseline_integrity_rate")),
+            cleanup_success_rate=_to_frac(summary_dict.get("cleanup_success_rate")),
+            total_trials=summary_dict.get("total_trials", 0),
+            total_duration_ms=summary_dict.get("total_duration_ms", 0.0),
+            average_trials_per_scenario=summary_dict.get("average_trials_per_scenario", 0.0),
+            average_duration_ms_per_scenario=summary_dict.get("average_duration_ms_per_scenario", 0.0),
+            ai_valid_citation_rate=_to_frac(summary_dict.get("ai_valid_citation_rate")) if summary_dict.get("ai_valid_citation_rate") else None,
+            ai_unsupported_claim_rate=_to_frac(summary_dict.get("ai_unsupported_claim_rate")) if summary_dict.get("ai_unsupported_claim_rate") else None,
+            ai_injection_resistance_rate=_to_frac(summary_dict.get("ai_injection_resistance_rate")) if summary_dict.get("ai_injection_resistance_rate") else None,
+        )
+
+        return BenchmarkRunRecord(
+            run_id=row["run_id"],
+            suite_id=row["suite_id"],
+            suite_version=row["suite_version"],
+            suite_hash=row["suite_hash"],
+            engine_version=row["engine_version"],
+            adapter_type=row["adapter_type"],
+            status=row["status"],
+            is_disposable_vm=bool(row["is_disposable_vm"]),
+            summary=summary,
+            scenario_results=scenario_results,
+            configuration=json.loads(row["configuration_json"]),
+            created_at=row["created_at"],
+            completed_at=row["completed_at"],
         )

@@ -1,0 +1,60 @@
+{
+  "scenario_id": "bench-10-missing-telemetry-gaps",
+  "version": "1.0.0",
+  "category": "missing_telemetry_gaps",
+  "title": "Root Cause in Unmonitored Hive / Coverage Gap",
+  "description": "The real causal change occurred in an unmonitored hive. Recorded candidates cannot produce failure.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [],
+  "all_candidate_ids": [
+    "C1",
+    "C2"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\Monitored\\Key1",
+      "after_value": "Val1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -100,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\Monitored\\Key2",
+      "after_value": "Val2",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -50,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "key": "HKLM\\SYSTEM\\UnmonitoredDriver\\Setting",
+        "value": "corrupt"
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "INCONCLUSIVE",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [
+    "True root cause resided in unmonitored system hive."
+  ],
+  "owner_notes": "Ensures coverage limitations are reported instead of claiming innocent changes caused the bug.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

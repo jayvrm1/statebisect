@@ -1,0 +1,132 @@
+{
+  "scenario_id": "bench-02-single-with-bystanders",
+  "version": "1.0.0",
+  "category": "single_cause_with_bystanders",
+  "title": "Single Causal Change with 7 Bystander Changes",
+  "description": "Seven innocent UI/cache changes co-occur with one breaking TLS protocol downgrade.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C4"
+  ],
+  "all_candidate_ids": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\Theme",
+      "after_value": "Dark",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -500,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\Font",
+      "after_value": "Segoe UI",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -450,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C3",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\WindowLeft",
+      "after_value": "100",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -400,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C4",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\SSLProtocol",
+      "after_value": "SSL3",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -350,
+      "is_post_onset": false,
+      "description": "Insecure protocol forced"
+    },
+    {
+      "candidate_id": "C5",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\MRU",
+      "after_value": "file1.txt",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -300,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C6",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\Toolbar",
+      "after_value": "Compact",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -250,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C7",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\CheckUpdates",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -200,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C8",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\LogVerbosity",
+      "after_value": "Debug",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -150,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "key": "HKLM\\Software\\App\\SSLProtocol",
+        "value": "SSL3"
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "VERIFIED_SET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Tests bystander rejection across 8 candidates.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

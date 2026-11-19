@@ -1,0 +1,131 @@
+{
+  "scenario_id": "bench-04-three-change-interaction",
+  "version": "1.0.0",
+  "category": "three_change_interaction",
+  "title": "Three-Change Interaction Failure (C1 + C4 + C7)",
+  "description": "Requires three disparate feature flags to all be active to reproduce a crash.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C1",
+    "C4",
+    "C7"
+  ],
+  "all_candidate_ids": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\FeatureX",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -700,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\FeatureA",
+      "after_value": "0",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -650,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C3",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\FeatureB",
+      "after_value": "0",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -600,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C4",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\FeatureY",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -550,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C5",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\FeatureC",
+      "after_value": "0",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -500,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C6",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\FeatureD",
+      "after_value": "0",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -450,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C7",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\FeatureZ",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -400,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "type": "interaction",
+        "keys": [
+          "HKLM\\Software\\App\\FeatureX",
+          "HKLM\\Software\\App\\FeatureY",
+          "HKLM\\Software\\App\\FeatureZ"
+        ],
+        "values": [
+          "1",
+          "1",
+          "1"
+        ]
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "VERIFIED_SET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Multi-way interaction stress test.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

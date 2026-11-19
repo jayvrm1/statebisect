@@ -1,0 +1,82 @@
+{
+  "scenario_id": "bench-06-dependency-constrained",
+  "version": "1.0.0",
+  "category": "dependency_constrained",
+  "title": "Ordered Dependency-Constrained Configuration Changes",
+  "description": "Database migration (C1) followed by application schema bump (C2) where C2 depends on C1.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C1",
+    "C2"
+  ],
+  "all_candidate_ids": [
+    "C1",
+    "C2",
+    "C3"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "file",
+      "object_key": "AppData\\SchemaVersion",
+      "after_value": "v2",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -400,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\RequireV2",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [
+        "C1"
+      ],
+      "relative_time_seconds": -200,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C3",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\IconCache",
+      "after_value": "reset",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -100,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "type": "interaction",
+        "keys": [
+          "AppData\\SchemaVersion",
+          "HKLM\\Software\\App\\RequireV2"
+        ],
+        "values": [
+          "v2",
+          "1"
+        ]
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "INCONCLUSIVE_SUBSET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Tests topological change sorting during trial execution.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

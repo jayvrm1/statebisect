@@ -1,0 +1,56 @@
+{
+  "scenario_id": "bench-12-cleanup-failure-corruption",
+  "version": "1.0.0",
+  "category": "cleanup_failure_corruption",
+  "title": "Post-Trial Cleanup Fails Corrupting Environment",
+  "description": "Post-trial cleanup raises an exception. Environment status transitions to CORRUPTED and prevents subsequent runs.",
+  "adapter_type": "FAKE",
+  "ground_truth_causes": [],
+  "all_candidate_ids": [
+    "C1",
+    "C2"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\A",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -100,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\B",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -50,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "INCONCLUSIVE",
+  "baseline_id": "fake-base-001",
+  "differential_baseline_id": null,
+  "fault_injection": {
+    "fail_cleanup": true,
+    "corrupt_on_cleanup_failure": true
+  },
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Verifies environment corruption handling and exception safety.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

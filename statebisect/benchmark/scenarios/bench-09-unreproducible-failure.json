@@ -1,0 +1,65 @@
+{
+  "scenario_id": "bench-09-unreproducible-failure",
+  "version": "1.0.0",
+  "category": "unreproducible_failure",
+  "title": "Reported Failure Cannot Be Reproduced (All Trials Pass)",
+  "description": "Applying all candidate changes passes the health check. Failure cannot be reproduced under test oracle.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [],
+  "all_candidate_ids": [
+    "C1",
+    "C2",
+    "C3"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\Setting1",
+      "after_value": "A",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -300,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\Setting2",
+      "after_value": "B",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -200,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C3",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\Setting3",
+      "after_value": "C",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -100,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "INCONCLUSIVE",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Full candidate set passes oracle; engine aborts without false accusations.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

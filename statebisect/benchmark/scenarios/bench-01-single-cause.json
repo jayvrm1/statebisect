@@ -1,0 +1,48 @@
+{
+  "scenario_id": "bench-01-single-cause",
+  "version": "1.0.0",
+  "category": "single_cause",
+  "title": "Single Configuration Change Failure",
+  "description": "A single invalid registry value causes service health check to fail immediately.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C1"
+  ],
+  "all_candidate_ids": [
+    "C1"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\Timeout",
+      "after_value": "0",
+      "before_value": "30",
+      "dependencies": [],
+      "relative_time_seconds": -120.0,
+      "is_post_onset": false,
+      "description": "Service timeout reduced to zero"
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "key": "HKLM\\Software\\App\\Timeout",
+        "value": "0"
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "VERIFIED_SET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Clean 1-change baseline failure.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

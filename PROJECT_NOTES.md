@@ -475,10 +475,88 @@ Crucially, **the deterministic engine remains the sole authority** for all empir
 - Phase 10 AI CLI workflows verified end-to-end (`statebisect ai-status`).
 - Schema migrations from v1 through v9 verified with zero data loss.
 
-## Next Phase: Phase 11 — Benchmarking, Release Hardening, & Distribution
-- **Entry Criteria**: Phase 10 acceptance criteria met (evidence-grounded AI explanation layer, OpenAI Structured Outputs via stdlib, deterministic mock provider, fallback summaries, schema migration 9, read-only MCP server, 172 tests passing).
-- **Upcoming Deliverables**:
-  - Reproducible benchmark suites measuring isolation overhead, search efficiency, and accuracy.
-  - Performance profiling and memory optimizations for long-running investigations.
-  - Final packaging, distribution artifacts, and release documentation.
+## Next Phase: Phase 11 — Benchmarking, Release Hardening, & Distribution (Completed)
+- **Status**: Completed (Release Candidate).
+- **Deliverables Delivered**:
+  - Reproducible benchmark suite measuring search efficiency, exact set accuracy, minimality, and robustness.
+  - Hardened local dashboard API with strict loopback validation, anti-CSRF custom headers, and path traversal guards.
+  - Standard `pyproject.toml` packaging with entrypoints and zero external dependencies.
+  - Automated CI workflow with static AST audit enforcing the exception-handling rule.
+  - Formal Release-Readiness Report (`docs/release_readiness_report.md`).
   - Strict preservation of the safety boundary: NO automatic live-system repairs.
+
+## Phase 11 Implementation: Reproducible Benchmarking, Product Hardening, & Release Readiness
+
+### Overview
+Phase 11 completes the StateBisect roadmap by establishing honest, empirical benchmark evidence of the system's capabilities and limitations across 15 ground-truth scenarios, hardening the product against local web vulnerabilities, and preparing a reproducible release candidate.
+
+### Key Components & Implementations
+1. **`statebisect/benchmark/models.py`**:
+   - `BenchmarkCategory`: 15 canonical failure and diagnostic challenge categories.
+   - `BenchmarkScenario`: Versioned test case specifying candidates, ground-truth causes, oracle health check, baseline references, seeds, and expected classifications.
+   - `ScenarioExecutionResult`: Scenario-level outcomes, trials count, duration, precision, recall, exact match, 1-minimality, bystander rejection, and fault handling notes.
+   - `MetricFraction`: Precise fraction model holding numerator, denominator, and percentage.
+   - `BenchmarkMetricsSummary`: Comprehensive audit metrics summary.
+   - `BenchmarkRunRecord`: Persistent record storing suite version, suite hash, engine version, configuration, adapter, and summary.
+2. **`statebisect/benchmark/scenarios_data.py` & `scenarios/*.json`**:
+   - 15 canonical ground-truth JSON scenarios covering:
+     1. Single cause (`bench-01-single-cause`)
+     2. Single cause with 7 bystanders (`bench-02-single-with-bystanders`)
+     3. Two-change interaction (`bench-03-two-change-interaction`)
+     4. Three-change interaction (`bench-04-three-change-interaction`)
+     5. Bystander with dependency (`bench-05-bystander-with-dependency`)
+     6. Dependency constrained (`bench-06-dependency-constrained`)
+     7. Multiple minimal sets (`bench-07-multiple-minimal-sets`)
+     8. Intermittent / flaky health check (`bench-08-intermittent-health-check`)
+     9. Unreproducible failure (`bench-09-unreproducible-failure`)
+     10. Missing telemetry / coverage gaps (`bench-10-missing-telemetry-gaps`)
+     11. Failed baseline restoration (`bench-11-failed-baseline-restore`)
+     12. Cleanup failure & environment corruption (`bench-12-cleanup-failure-corruption`)
+     13. Differential baseline validation (`bench-13-differential-baseline`)
+     14. False temporal correlation (`bench-14-false-temporal-correlation`)
+     15. Post-onset consequence filtering (`bench-15-post-onset-consequence`)
+3. **`statebisect/benchmark/suite.py` (`BenchmarkSuite`)**:
+   - Scenario loading, validation of dependencies and schemas, and deterministic SHA-256 suite hash computation.
+4. **`statebisect/benchmark/runner.py` (`BenchmarkRunner`)**:
+   - Bounded execution with isolated storage (defaults to `:memory:` or temporary database to guarantee production database protection).
+   - Real VM execution safety guard: Hyper-V adapter is refused unless `allow_real_vm=True` is explicitly specified.
+   - Bounded trials, cancellation support, and partial record preservation.
+5. **`statebisect/benchmark/metrics.py` & `reporting.py`**:
+   - Calculates exact set accuracy, precision, recall, 1-minimality, interaction recognition, bystander rejection, false attribution, inconclusive handling, and integrity rates.
+   - Formats structured text reports and machine-readable JSON exports.
+6. **Schema Migration 10 (`statebisect/storage.py`)**:
+   - Updated `LATEST_SCHEMA_VERSION = 10`.
+   - Created `benchmark_runs` and `benchmark_results` tables with index on `run_id`.
+   - Added persistence methods: `save_benchmark_run`, `get_benchmark_run`, `list_benchmark_runs`, `delete_benchmark_run`.
+7. **Security & AST Hardening**:
+   - Strict loopback Host header and Origin validation in `DashboardServer`.
+   - Anti-CSRF custom header validation (`X-StateBisect-Request: 1`) on all state-changing routes.
+   - Path traversal guard using `Path.relative_to(STATIC_DIR)`.
+   - Enhanced secret scrubber regexes in `redact_sensitive_text` to handle quotes, passwords, tokens, API keys, and bearer tokens.
+   - Static AST inspection verifying zero `return`, `break`, or `continue` inside `finally` blocks across all modules.
+8. **Packaging & GitHub Actions CI**:
+   - Standard PEP 517/518/621 `pyproject.toml` with `setuptools.build_meta`, CLI console scripts, and zero PyPI dependencies.
+   - GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing Python 3.11 and 3.12 on Windows and Ubuntu with bytecode compilation, AST audit, test discovery, migration tests, demo checks, and benchmark runs.
+
+### Empirical Benchmark Results Summary
+- **Total Scenarios**: 15
+- **Exact Set Accuracy**: **15/15 (100.0%)**
+- **Element Precision**: **15/15 (100.0%)**
+- **Element Recall**: **15/15 (100.0%)**
+- **1-Minimality Adherence Rate**: **8/10 (80.0%)** (non-1-minimal sets are dependency-constrained where single removal is mathematically impossible)
+- **Interaction Recognition**: **4/4 (100.0%)**
+- **Bystander Rejection Rate**: **4/4 (100.0%)**
+- **False Attribution Rate**: **0/15 (0.0%)**
+- **Inconclusive Handling Rate**: **5/5 (100.0%)**
+- **Baseline Restore Integrity**: **14/15 (93.3%)**
+- **Post-Trial Cleanup Success**: **14/15 (93.3%)**
+- **Average Trials per Scenario**: **5.4 trials**
+- **Average Runtime per Scenario**: **1.0 ms** (simulation)
+
+## Verification Results
+- All **192 unit and integration tests passing** across 18 test modules (`python -m unittest discover -s tests -v`).
+- AST exception audit verified: 0 forbidden control flow statements in `finally` blocks.
+- Phase 1 programmatic demonstration script runs cleanly (`python demo_phase1.py`).
+- Phase 11 benchmark CLI workflows verified end-to-end (`statebisect benchmark run`).
+- Schema migrations from v1 through v10 verified with zero data loss.
+- Release-readiness report published at `docs/release_readiness_report.md`.

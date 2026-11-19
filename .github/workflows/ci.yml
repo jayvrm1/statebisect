@@ -1,0 +1,70 @@
+name: StateBisect CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test & Verify (Python ${{ matrix.python-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Validate syntax and compile bytecode
+        run: |
+          python -m compileall statebisect tests
+
+      - name: Run AST exception-handling audit (No return/break/continue in finally)
+        run: |
+          python -c "import ast, glob, sys
+          errs = []
+          for p in glob.glob('statebisect/**/*.py', recursive=True) + glob.glob('tests/**/*.py', recursive=True):
+              tree = ast.parse(open(p, encoding='utf-8').read(), filename=p)
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Try):
+                      for fb in node.finalbody:
+                          for sub in ast.walk(fb):
+                              if isinstance(sub, (ast.Return, ast.Break, ast.Continue)):
+                                  errs.append(f'{p}:{sub.lineno} forbidden {type(sub).__name__} in finally block')
+          if errs:
+              print('\n'.join(errs), file=sys.stderr)
+              sys.exit(1)
+          print('AST exception-handling audit passed: 0 forbidden control flow statements in finally blocks.')"
+
+      - name: Run complete test suite
+        run: |
+          python -m unittest discover -s tests -v
+
+      - name: Run schema migrations test
+        run: |
+          python -m unittest tests.test_migration
+
+      - name: Run Phase 1 demonstration script
+        run: |
+          python demo_phase1.py
+
+      - name: Validate benchmark suite
+        run: |
+          python statebisect_cli.py benchmark validate
+
+      - name: Run reproducible benchmark suite (Simulation adapter)
+        run: |
+          python statebisect_cli.py benchmark run --adapter simulation --format text

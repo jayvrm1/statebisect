@@ -127,6 +127,22 @@ from .dashboard import (
     DashboardServer,
     run_dashboard,
 )
+from .benchmark import (
+    BenchmarkCategory,
+    BenchmarkMetricsSummary,
+    BenchmarkRunRecord,
+    BenchmarkRunner,
+    BenchmarkScenario,
+    BenchmarkSuite,
+    CandidateSpec,
+    ExpectedVerdict,
+    HealthCheckSpec,
+    MetricFraction,
+    ScenarioExecutionResult,
+    calculate_benchmark_metrics,
+    format_benchmark_report_json,
+    format_benchmark_report_text,
+)
 
 __version__ = ENGINE_VERSION
 __all__ = [
@@ -236,6 +252,20 @@ __all__ = [
     "MockExplanationProvider",
     "OpenAIExplanationProvider",
     "ProviderStatus",
+    "BenchmarkCategory",
+    "BenchmarkMetricsSummary",
+    "BenchmarkRunRecord",
+    "BenchmarkRunner",
+    "BenchmarkScenario",
+    "BenchmarkSuite",
+    "CandidateSpec",
+    "ExpectedVerdict",
+    "HealthCheckSpec",
+    "MetricFraction",
+    "ScenarioExecutionResult",
+    "calculate_benchmark_metrics",
+    "format_benchmark_report_json",
+    "format_benchmark_report_text",
     "sanitize_and_bound_evidence",
     "validate_and_parse_scenario",
 ]

@@ -1,0 +1,95 @@
+{
+  "scenario_id": "bench-07-multiple-minimal-sets",
+  "version": "1.0.0",
+  "category": "multiple_minimal_sets",
+  "title": "Multiple Minimal Sets (C1 alone OR C2+C3)",
+  "description": "Two distinct configuration errors can each independently trigger the failure. Delta debugging isolates one 1-minimal set.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C1"
+  ],
+  "all_candidate_ids": [
+    "C1",
+    "C2",
+    "C3",
+    "C4"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\BadPort",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -300,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\UseAuth",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -200,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C3",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\EmptySecret",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -100,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C4",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\Bystander",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -50,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "key": "HKLM\\Software\\App\\BadPort",
+        "value": "1"
+      },
+      {
+        "type": "interaction",
+        "keys": [
+          "HKLM\\Software\\App\\UseAuth",
+          "HKLM\\Software\\App\\EmptySecret"
+        ],
+        "values": [
+          "1",
+          "1"
+        ]
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "VERIFIED_SET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Verifies 1-minimality when multiple minimal failure sets exist.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

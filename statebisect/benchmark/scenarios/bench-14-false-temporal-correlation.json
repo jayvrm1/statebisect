@@ -1,0 +1,60 @@
+{
+  "scenario_id": "bench-14-false-temporal-correlation",
+  "version": "1.0.0",
+  "category": "false_temporal_correlation",
+  "title": "Harmless Change at T-1s vs True Cause at T-2h",
+  "description": "A benign UI setting changed 1 second before crash. The actual breaking config change occurred 2 hours earlier.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C1"
+  ],
+  "all_candidate_ids": [
+    "C1",
+    "C2"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\ListenPort",
+      "after_value": "8081",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -7200.0,
+      "is_post_onset": false,
+      "description": "Port changed 2h ago"
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\LastMousePos",
+      "after_value": "120,450",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -1.0,
+      "is_post_onset": false,
+      "description": "Mouse moved 1s ago"
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "key": "HKLM\\Software\\App\\ListenPort",
+        "value": "8081"
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "VERIFIED_SET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Ensures empirical delta debugging overrides temporal proximity bias.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

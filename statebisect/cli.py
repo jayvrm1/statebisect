@@ -2233,6 +2233,173 @@ def cmd_ai_clear_history(args: argparse.Namespace) -> int:
             storage.close()
 
 
+# ============================================================================
+# Phase 11: Reproducible Benchmark Commands
+# ============================================================================
+
+def cmd_benchmark_list(args: argparse.Namespace) -> int:
+    """List available benchmark scenarios and classifications."""
+    from .benchmark.suite import BenchmarkSuite
+    try:
+        scenarios_dir = getattr(args, "scenarios_dir", None)
+        suite = BenchmarkSuite.load_from_directory(scenarios_dir) if scenarios_dir else BenchmarkSuite.get_default_suite()
+        fmt = getattr(args, "format", "text")
+        if fmt == "json":
+            data = [s.to_dict() for s in suite.scenarios]
+            print(json.dumps(data, indent=2))
+            return 0
+
+        print("=" * 80)
+        print(f"STATEBISECT BENCHMARK SCENARIO SUITE: {suite.suite_id} (v{suite.version})")
+        print("=" * 80)
+        print(f"Suite Hash : {suite.compute_suite_hash()[:16]}...")
+        print(f"Total Cases: {len(suite.scenarios)}")
+        print("-" * 80)
+        print(f"{'Scenario ID':<36} {'Category':<28} {'Expected Classification'}")
+        print("-" * 80)
+        for s in suite.scenarios:
+            print(f"{s.scenario_id:<36} {s.category.value:<28} {s.expected_classification.value}")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Benchmark List Error: {err}", file=sys.stderr)
+        if getattr(args, "verbose", False):
+            traceback.print_exc()
+        return 1
+
+
+def cmd_benchmark_validate(args: argparse.Namespace) -> int:
+    """Validate benchmark suite scenario schemas, dependencies, and cryptographic hash."""
+    from .benchmark.suite import BenchmarkSuite
+    try:
+        scenarios_dir = getattr(args, "scenarios_dir", None)
+        suite = BenchmarkSuite.load_from_directory(scenarios_dir) if scenarios_dir else BenchmarkSuite.get_default_suite()
+        errors = suite.validate()
+        suite_hash = suite.compute_suite_hash()
+
+        if errors:
+            print(f"FAILED: Benchmark suite validation encountered {len(errors)} error(s):", file=sys.stderr)
+            for e in errors:
+                print(f"  * {e}", file=sys.stderr)
+            return 1
+
+        print("=" * 80)
+        print("BENCHMARK SUITE VALIDATION PASSED")
+        print("=" * 80)
+        print(f"Suite ID         : {suite.suite_id}")
+        print(f"Version          : {suite.version}")
+        print(f"Suite Hash       : {suite_hash}")
+        print(f"Valid Scenarios  : {len(suite.scenarios)}")
+        print("Integrity Status : 100% Valid (All candidates, seeds, and dependencies verified)")
+        print("=" * 80)
+        return 0
+    except Exception as err:
+        print(f"Benchmark Validate Error: {err}", file=sys.stderr)
+        if getattr(args, "verbose", False):
+            traceback.print_exc()
+        return 1
+
+
+def cmd_benchmark_run(args: argparse.Namespace) -> int:
+    """Execute reproducible benchmark suite with bounded trials and isolated storage."""
+    from .adapters.models import AdapterType
+    from .benchmark.reporting import format_benchmark_report_json, format_benchmark_report_text
+    from .benchmark.runner import BenchmarkRunner
+    from .benchmark.suite import BenchmarkSuite
+
+    storage = None
+    try:
+        db_path = getattr(args, "db", None)
+        data_dir = getattr(args, "data_dir", None)
+        # Bounded isolated storage: if no db explicitly passed, use :memory: so production db is never touched
+        if db_path:
+            storage = get_storage(db_path, data_dir)
+        else:
+            storage = Storage(":memory:")
+
+        scenarios_dir = getattr(args, "scenarios_dir", None)
+        suite = BenchmarkSuite.load_from_directory(scenarios_dir) if scenarios_dir else BenchmarkSuite.get_default_suite()
+
+        adapter_name = getattr(args, "adapter", "simulation").lower()
+        adapter_override = None
+        if adapter_name == "fake":
+            adapter_override = AdapterType.FAKE
+        elif adapter_name == "simulation":
+            adapter_override = AdapterType.SIMULATION
+        elif adapter_name == "hyperv":
+            adapter_override = AdapterType.HYPERV
+
+        allow_vm = bool(getattr(args, "allow_real_vm", False))
+
+        runner = BenchmarkRunner(
+            storage=storage,
+            allow_real_vm=allow_vm,
+        )
+
+        record = runner.run_suite(suite=suite, adapter_override=adapter_override)
+
+        # Save to storage
+        storage.save_benchmark_run(record)
+
+        # Output formatting
+        fmt = getattr(args, "format", "text")
+        output_path = getattr(args, "output", None)
+
+        if fmt == "json":
+            out_str = format_benchmark_report_json(record)
+        else:
+            out_str = format_benchmark_report_text(record)
+
+        if output_path:
+            Path(output_path).write_text(out_str, encoding="utf-8")
+            print(f"Benchmark report saved to: {output_path}")
+        else:
+            print(out_str)
+
+        return 0 if record.status == "COMPLETED" else 1
+    except Exception as err:
+        print(f"Benchmark Run Error: {err}", file=sys.stderr)
+        if getattr(args, "verbose", False):
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
+def cmd_benchmark_report(args: argparse.Namespace) -> int:
+    """Retrieve and display a saved benchmark run report."""
+    from .benchmark.reporting import format_benchmark_report_json, format_benchmark_report_text
+
+    storage = None
+    try:
+        db_path = getattr(args, "db", None)
+        data_dir = getattr(args, "data_dir", None)
+        storage = get_storage(db_path, data_dir)
+
+        run_id = args.run_id
+        record = storage.get_benchmark_run(run_id)
+        if not record:
+            print(f"Error: Benchmark run '{run_id}' not found in database.", file=sys.stderr)
+            return 1
+
+        fmt = getattr(args, "format", "text")
+        if fmt == "json":
+            print(format_benchmark_report_json(record))
+        else:
+            print(format_benchmark_report_text(record))
+
+        return 0
+    except Exception as err:
+        print(f"Benchmark Report Error: {err}", file=sys.stderr)
+        if getattr(args, "verbose", False):
+            traceback.print_exc()
+        return 1
+    finally:
+        if storage:
+            storage.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -2547,6 +2714,61 @@ def build_parser() -> argparse.ArgumentParser:
     p_ai_clr.add_argument("--db", default=None, help="Path to SQLite database file.")
     p_ai_clr.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
 
+    # ========================================================================
+    # Phase 11: Reproducible Benchmarking Subcommands
+    # ========================================================================
+
+    # benchmark (nested)
+    p_bench = subparsers.add_parser("benchmark", help="Reproducible benchmarking suite and empirical validation.")
+    bench_subs = p_bench.add_subparsers(dest="benchmark_action", required=True, help="Benchmark action to execute")
+
+    p_blist = bench_subs.add_parser("list", help="List all benchmark scenarios.")
+    p_blist.add_argument("--scenarios-dir", default=None, help="Directory containing custom scenario JSON files.")
+    p_blist.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+
+    p_bval = bench_subs.add_parser("validate", help="Validate scenario schemas, seeds, and cryptographic hash.")
+    p_bval.add_argument("--scenarios-dir", default=None, help="Directory containing custom scenario JSON files.")
+
+    p_brun = bench_subs.add_parser("run", help="Run benchmark suite and compute empirical metrics.")
+    p_brun.add_argument("--suite", default="default", help="Benchmark suite identifier (default: default).")
+    p_brun.add_argument("--adapter", choices=["simulation", "fake", "hyperv"], default="simulation", help="Environment adapter.")
+    p_brun.add_argument("--allow-real-vm", action="store_true", help="Explicit opt-in required to execute against real disposable Hyper-V VM.")
+    p_brun.add_argument("--output", "-o", default=None, help="Optional output file path for report.")
+    p_brun.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_brun.add_argument("--db", default=None, help="Optional SQLite database path (defaults to isolated in-memory DB).")
+    p_brun.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+    p_brun.add_argument("--scenarios-dir", default=None, help="Directory containing custom scenario JSON files.")
+
+    p_brep = bench_subs.add_parser("report", help="View report for a previous benchmark run.")
+    p_brep.add_argument("run_id", help="Benchmark run identifier.")
+    p_brep.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_brep.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_brep.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
+    # Top-level benchmark aliases
+    p_alt_blist = subparsers.add_parser("benchmark-list", help="List all benchmark scenarios.")
+    p_alt_blist.add_argument("--scenarios-dir", default=None, help="Directory containing custom scenario JSON files.")
+    p_alt_blist.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+
+    p_alt_bval = subparsers.add_parser("benchmark-validate", help="Validate benchmark scenario schemas.")
+    p_alt_bval.add_argument("--scenarios-dir", default=None, help="Directory containing custom scenario JSON files.")
+
+    p_alt_brun = subparsers.add_parser("benchmark-run", help="Run benchmark suite and compute empirical metrics.")
+    p_alt_brun.add_argument("--suite", default="default", help="Benchmark suite identifier.")
+    p_alt_brun.add_argument("--adapter", choices=["simulation", "fake", "hyperv"], default="simulation", help="Environment adapter.")
+    p_alt_brun.add_argument("--allow-real-vm", action="store_true", help="Explicit opt-in required to execute against real disposable Hyper-V VM.")
+    p_alt_brun.add_argument("--output", "-o", default=None, help="Optional output file path for report.")
+    p_alt_brun.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_alt_brun.add_argument("--db", default=None, help="Optional SQLite database path.")
+    p_alt_brun.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+    p_alt_brun.add_argument("--scenarios-dir", default=None, help="Directory containing custom scenario JSON files.")
+
+    p_alt_brep = subparsers.add_parser("benchmark-report", help="View report for a previous benchmark run.")
+    p_alt_brep.add_argument("run_id", help="Benchmark run identifier.")
+    p_alt_brep.add_argument("--format", choices=["text", "json"], default="text", help="Output format.")
+    p_alt_brep.add_argument("--db", default=None, help="Path to SQLite database file.")
+    p_alt_brep.add_argument("--data-dir", default=None, help="Path to directory for SQLite database storage.")
+
     return parser
 
 
@@ -2634,6 +2856,26 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ai_history(args)
     elif args.command == "ai-clear-history":
         return cmd_ai_clear_history(args)
+    elif args.command == "benchmark":
+        if args.benchmark_action == "list":
+            return cmd_benchmark_list(args)
+        elif args.benchmark_action == "validate":
+            return cmd_benchmark_validate(args)
+        elif args.benchmark_action == "run":
+            return cmd_benchmark_run(args)
+        elif args.benchmark_action == "report":
+            return cmd_benchmark_report(args)
+        else:
+            parser.print_help()
+            return 2
+    elif args.command == "benchmark-list":
+        return cmd_benchmark_list(args)
+    elif args.command == "benchmark-validate":
+        return cmd_benchmark_validate(args)
+    elif args.command == "benchmark-run":
+        return cmd_benchmark_run(args)
+    elif args.command == "benchmark-report":
+        return cmd_benchmark_report(args)
     else:
         parser.print_help()
         return 2

@@ -96,6 +96,14 @@ statebisect/
 │   │       ├── base.py      # ExplanationProvider abstract interface
 │   │       ├── mock_provider.py # Deterministic mock provider with adversarial test flags
 │   │       └── openai_provider.py # Zero-dep OpenAI Structured Outputs provider (urllib.request)
+│   ├── benchmark/           # Reproducible benchmarking & metrics (Phase 11)
+│   │   ├── __init__.py      # Benchmark exports
+│   │   ├── models.py        # BenchmarkScenario, ScenarioExecutionResult, BenchmarkRunRecord, MetricFraction
+│   │   ├── suite.py         # BenchmarkSuite loader, validator, and SHA-256 fingerprinting
+│   │   ├── runner.py        # BenchmarkRunner bounded executor (trials/timeout/memory bounds)
+│   │   ├── metrics.py       # Exact accuracy, precision/recall, 1-minimality, bystander rejection
+│   │   ├── reporting.py     # High-contrast text tables and JSON audit formatters
+│   │   └── scenarios/       # 15 canonical ground-truth JSON benchmark scenarios
 │   ├── health_checks/       # Pluggable, versioned health-check system
 │   │   ├── base.py          # BaseHealthCheck, evidence bounding, and secret redaction
 │   │   ├── simulated_state.py # State condition matcher (key-value and compound)
@@ -109,6 +117,8 @@ statebisect/
 │   ├── storage.py           # SQLite persistence layer with schema migrations & evidence store
 │   └── reporting.py         # Diagnostic text and JSON report generators
 ├── tests/
+│   ├── test_hardening.py    # Phase 11 AST exception audit, loopback/host security, CSRF, and secret scrubbing
+│   ├── test_benchmark.py    # Phase 11 benchmark suite, 15 scenarios, metrics, cancellation, and persistence
 │   ├── test_ai.py           # Phase 10 AI explanation grounding, citations, invariants, MCP, and security
 │   ├── test_dashboard.py    # Phase 9 dashboard API, security boundaries, and CSRF tests
 │   ├── test_verification.py # Phase 8 verification protocol, necessity, reversal, and CLI tests
@@ -437,18 +447,45 @@ python statebisect_cli.py ai-explain <investigation_id> --provider openai --conf
 # 4. Inspect or clear explanation audit history
 python statebisect_cli.py ai-history <investigation_id>
 python statebisect_cli.py ai-clear-history <investigation_id>
+
+# --- Reproducible Benchmark Suite Commands (Phase 11) ---
+# 1. List all 15 ground-truth benchmark scenarios
+python statebisect_cli.py benchmark list
+python statebisect_cli.py benchmark list --format json
+
+# 2. Validate benchmark scenario definitions, schemas, seeds, and SHA-256 hash
+python statebisect_cli.py benchmark validate
+
+# 3. Run full benchmark suite in isolated simulation/fake environment
+python statebisect_cli.py benchmark run
+python statebisect_cli.py benchmark run --adapter simulation --format text
+python statebisect_cli.py benchmark run --format json -o benchmark_report.json
+
+# 4. Run benchmark against an explicit database and view stored report
+python statebisect_cli.py benchmark run --db bench_runs.db
+python statebisect_cli.py benchmark report <run_id> --db bench_runs.db
 ```
 
 ## 12. Running Tests and Demos
 
-### Run Full Test Suite (172 Tests Across 16 Modules)
+### Run Full Test Suite (192 Tests Across 18 Modules)
 ```powershell
 python -m unittest discover -s tests -v
+```
+
+### Run AST Exception-Handling Audit (Zero return/break/continue in finally)
+```powershell
+python -m unittest tests.test_hardening.TestAstExceptionHandlingAudit
 ```
 
 ### Run Phase 1 Demonstration Script
 ```powershell
 python demo_phase1.py
+```
+
+### Run Reproducible Benchmark Suite
+```powershell
+python statebisect_cli.py benchmark run
 ```
 
 ## 13. Phase Status
@@ -464,4 +501,4 @@ python demo_phase1.py
 - [x] **Phase 8 — Verification, reproduction, and differential validation**: Completed.
 - [x] **Phase 9 — Investigation Dashboard & Visualization**: Completed.
 - [x] **Phase 10 — AI Explanation Layer & Synthesis**: Completed.
-- [ ] **Phase 11 — Benchmarking, Release Hardening, & Distribution**: Next phase.
+- [x] **Phase 11 — Benchmarking, Release Hardening, & Distribution**: Completed (Release Candidate).

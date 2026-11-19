@@ -1,0 +1,43 @@
+{
+  "scenario_id": "bench-11-failed-baseline-restore",
+  "version": "1.0.0",
+  "category": "failed_baseline_restore",
+  "title": "Adapter Baseline Restoration Fails Before Trial",
+  "description": "The underlying snapshot or checkpoint restore operation fails. Engine halts safely.",
+  "adapter_type": "FAKE",
+  "ground_truth_causes": [],
+  "all_candidate_ids": [
+    "C1"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\Key",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -60,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "INCONCLUSIVE",
+  "baseline_id": "fake-base-001",
+  "differential_baseline_id": null,
+  "fault_injection": {
+    "fail_restore": true
+  },
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Tests safety boundary: adapter restore failure immediately halts trials.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

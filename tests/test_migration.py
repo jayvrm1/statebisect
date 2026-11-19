@@ -25,7 +25,7 @@ class TestDatabaseMigrations(unittest.TestCase):
     def test_fresh_schema_initialization(self):
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
 
             # Check that all tables exist
             cursor = storage._conn.execute(
@@ -52,6 +52,8 @@ class TestDatabaseMigrations(unittest.TestCase):
             self.assertIn("verification_runs", tables)
             self.assertIn("verification_trials", tables)
             self.assertIn("ai_explanations", tables)
+            self.assertIn("benchmark_runs", tables)
+            self.assertIn("benchmark_results", tables)
         finally:
             storage.close()
 
@@ -97,7 +99,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with StateBisect Storage (migrating to v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
 
             # 3. Verify existing legacy data is preserved intact
             inv = storage.get_investigation("phase1-inv")
@@ -186,7 +188,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with Storage (applies v4, v5, v6, v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
             # Verify Phase 3 evidence preserved
             cursor = storage._conn.execute(
                 "SELECT status FROM health_check_evidence WHERE trial_id = 't-1'"
@@ -240,7 +242,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with Storage (applies v5, v6, v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
             # Verify Phase 4 run preserved
             runs = storage.list_collection_runs()
             self.assertEqual(len(runs), 1)
@@ -292,7 +294,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with Storage (applies v6, v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
             inv = storage.get_investigation("inv-p5")
             self.assertIsNotNone(inv)
             self.assertEqual(inv.symptom, "Test v5 symptom")
@@ -350,7 +352,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with Storage (applies v7, v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
 
             # Verify tables exist
             cursor = storage._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -417,7 +419,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with Storage (applies v8)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
             cursor = storage._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = {r[0] for r in cursor.fetchall()}
             self.assertIn("verification_runs", tables)
@@ -493,7 +495,7 @@ class TestDatabaseMigrations(unittest.TestCase):
         # 2. Open with Storage (applies v9)
         storage = Storage(self.db_path)
         try:
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
             cursor = storage._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = {r[0] for r in cursor.fetchall()}
             self.assertIn("ai_explanations", tables)
@@ -525,12 +527,51 @@ class TestDatabaseMigrations(unittest.TestCase):
         finally:
             storage.close()
 
+    def test_migrate_phase9_to_phase10_benchmark_tables(self):
+        # 1. Setup schema up to v9
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    description TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations VALUES (9, datetime('now'), 'v9');
+                CREATE TABLE investigations (id TEXT PRIMARY KEY, symptom TEXT, target_system TEXT, status TEXT, baseline_id TEXT, created_at TEXT, updated_at TEXT);
+                INSERT INTO investigations VALUES ('inv-10', 'Sym', 'Target', 'NEW', 'b-1', '2026-11-17T00:00:00Z', '2026-11-17T00:00:00Z');
+                """
+            )
+        conn.close()
+
+        # 2. Open with Storage (applies v10)
+        storage = Storage(self.db_path)
+        try:
+            self.assertEqual(storage.get_current_schema_version(), 10)
+            cursor = storage._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = {r[0] for r in cursor.fetchall()}
+            self.assertIn("benchmark_runs", tables)
+            self.assertIn("benchmark_results", tables)
+
+            from statebisect.benchmark import BenchmarkRunner
+            runner = BenchmarkRunner()
+            record = runner.run_suite()
+            storage.save_benchmark_run(record)
+
+            fetched = storage.get_benchmark_run(record.run_id)
+            self.assertIsNotNone(fetched)
+            self.assertEqual(fetched.run_id, record.run_id)
+            self.assertEqual(len(fetched.scenario_results), 15)
+        finally:
+            storage.close()
+
     def test_migrations_are_repeat_safe(self):
         storage = Storage(self.db_path)
         try:
             storage._apply_migrations()
             storage._apply_migrations()
-            self.assertEqual(storage.get_current_schema_version(), 9)
+            self.assertEqual(storage.get_current_schema_version(), 10)
         finally:
             storage.close()
 

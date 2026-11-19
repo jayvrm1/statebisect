@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statebisect"
+version = "0.3.0"
+description = "Deterministic Windows configuration delta-debugging and investigation system."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "StateBisect Team" }
+]
+keywords = [
+    "delta-debugging",
+    "windows",
+    "configuration",
+    "investigation",
+    "diagnostics",
+    "root-cause-analysis",
+    "benchmarking",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+]
+dependencies = []
+
+[project.scripts]
+statebisect = "statebisect.cli:main"
+statebisect-cli = "statebisect.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["statebisect*"]
+exclude = ["tests*", "data*", "scenarios*"]
+
+[tool.setuptools.package-data]
+statebisect = [
+    "benchmark/scenarios/*.json",
+    "dashboard/static/*",
+]

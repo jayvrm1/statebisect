@@ -1,0 +1,60 @@
+{
+  "scenario_id": "bench-13-differential-baseline",
+  "version": "1.0.0",
+  "category": "differential_baseline",
+  "title": "Differential Validation Across Compatible Baselines",
+  "description": "Candidate C1 reproduces failure on Windows 11 baseline, but passes cleanly on Windows 10 baseline.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C1"
+  ],
+  "all_candidate_ids": [
+    "C1",
+    "C2"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\Win11ModernStyle",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -200,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKCU\\Software\\App\\Bystander",
+      "after_value": "0",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -100,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "key": "HKLM\\Software\\App\\Win11ModernStyle",
+        "value": "1"
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "VERIFIED_SET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": "baseline-alt-002",
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Differential validation isolates version-specific baseline sensitivity.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}

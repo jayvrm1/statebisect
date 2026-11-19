@@ -1,0 +1,140 @@
+{
+  "scenario_id": "bench-03-two-change-interaction",
+  "version": "1.0.0",
+  "category": "two_change_interaction",
+  "title": "Two-Change Interaction Failure (C3 + C6)",
+  "description": "Neither change causes failure alone. Only the combination of ProxyEnabled=1 and DisableCertCheck=1 breaks the client.",
+  "adapter_type": "SIMULATION",
+  "ground_truth_causes": [
+    "C3",
+    "C6"
+  ],
+  "all_candidate_ids": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "C1",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\WorkerThreads",
+      "after_value": "8",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -800,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C2",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\MaxSockets",
+      "after_value": "1024",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -750,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C3",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\ProxyEnabled",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -700,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C4",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\CacheSizeMB",
+      "after_value": "256",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -650,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C5",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\KeepAliveSec",
+      "after_value": "60",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -600,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C6",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\DisableCertValidation",
+      "after_value": "1",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -550,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C7",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\Compression",
+      "after_value": "gzip",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -500,
+      "is_post_onset": false,
+      "description": ""
+    },
+    {
+      "candidate_id": "C8",
+      "category": "registry",
+      "object_key": "HKLM\\Software\\App\\RetryCount",
+      "after_value": "3",
+      "before_value": null,
+      "dependencies": [],
+      "relative_time_seconds": -450,
+      "is_post_onset": false,
+      "description": ""
+    }
+  ],
+  "health_check": {
+    "check_type": "simulated_state",
+    "version": "1.0.0",
+    "failure_conditions": [
+      {
+        "type": "interaction",
+        "keys": [
+          "HKLM\\Software\\App\\ProxyEnabled",
+          "HKLM\\Software\\App\\DisableCertValidation"
+        ],
+        "values": [
+          "1",
+          "1"
+        ]
+      }
+    ],
+    "is_intermittent": false,
+    "intermittent_rate": 0.5,
+    "parameters": {}
+  },
+  "expected_classification": "VERIFIED_SET",
+  "baseline_id": "baseline-001",
+  "differential_baseline_id": null,
+  "fault_injection": {},
+  "random_seed": 42,
+  "expected_limitations": [],
+  "owner_notes": "Requires interaction recognition algorithm in delta debugging.",
+  "creation_source": "StateBisect Engineering Ground-Truth Testbed"
+}
