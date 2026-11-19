@@ -47,6 +47,11 @@ def calculate_benchmark_metrics(
             total_duration_ms=0.0,
             average_trials_per_scenario=0.0,
             average_duration_ms_per_scenario=0.0,
+            diagnostic_accuracy=empty_frac,
+            diagnostic_coverage=empty_frac,
+            normal_restore_success_rate=empty_frac,
+            normal_cleanup_success_rate=empty_frac,
+            fault_containment_rate=empty_frac,
         )
 
     # 1. Exact Set Accuracy: cases where reported set matches ground truth exactly
@@ -55,6 +60,26 @@ def calculate_benchmark_metrics(
         exact_matches,
         total_scenarios,
         description="Fraction of scenarios where the reported failure-inducing set exactly matches ground truth.",
+    )
+
+    # 1b. Conclusive Diagnostic Accuracy & Coverage
+    causal_scenarios = [r for r in results if r.ground_truth_causes]
+    conclusive_matches = sum(
+        1
+        for r in causal_scenarios
+        if set(r.reported_causes) == set(r.ground_truth_causes) and r.verdict_observed == "VERIFIED_SET"
+    )
+    diagnostic_acc = make_fraction(
+        conclusive_matches,
+        len(causal_scenarios),
+        description="Fraction of causal scenarios where reported failure-inducing set exactly matched ground truth.",
+    )
+
+    conclusive_findings = sum(1 for r in results if r.verdict_observed == "VERIFIED_SET")
+    diagnostic_cov = make_fraction(
+        conclusive_findings,
+        total_scenarios,
+        description="Fraction of benchmark scenarios that yielded a conclusive verified cause finding.",
     )
 
     # 2. Element-level Precision & Recall
@@ -157,18 +182,58 @@ def calculate_benchmark_metrics(
         description="Fraction of uncertain, flaky, or corrupted cases correctly identified as inconclusive.",
     )
 
-    # 8. Baseline & Cleanup Integrity
+    # 8. Baseline & Cleanup Integrity (Split into Routine vs Intentional Fault Injection)
+    scenarios_without_restore_fault = [
+        r for r in results if r.category != BenchmarkCategory.FAILED_BASELINE_RESTORE
+    ]
+    normal_restore_ok = sum(1 for r in scenarios_without_restore_fault if r.baseline_restored_cleanly)
+    normal_restore_frac = make_fraction(
+        normal_restore_ok,
+        len(scenarios_without_restore_fault),
+        description="Routine baseline restore reliability on uncorrupted executions (excluding intentional fault tests).",
+    )
+
+    scenarios_without_cleanup_fault = [
+        r for r in results if r.category != BenchmarkCategory.CLEANUP_FAILURE_CORRUPTION
+    ]
+    normal_cleanup_ok = sum(1 for r in scenarios_without_cleanup_fault if r.cleanup_succeeded)
+    normal_cleanup_frac = make_fraction(
+        normal_cleanup_ok,
+        len(scenarios_without_cleanup_fault),
+        description="Routine post-trial cleanup reliability on uncorrupted executions (excluding intentional fault tests).",
+    )
+
+    fault_scenarios = [
+        r
+        for r in results
+        if r.category
+        in (
+            BenchmarkCategory.FAILED_BASELINE_RESTORE,
+            BenchmarkCategory.CLEANUP_FAILURE_CORRUPTION,
+        )
+    ]
+    faults_contained = sum(
+        1
+        for r in fault_scenarios
+        if r.verdict_observed in ("RESTORATION_FAILED", "CORRUPTED", "INCONCLUSIVE")
+    )
+    fault_containment_frac = make_fraction(
+        faults_contained,
+        len(fault_scenarios),
+        description="Fraction of intentional lifecycle faults safely caught and contained by isolation guards.",
+    )
+
     baseline_intact = sum(1 for r in results if r.baseline_restored_cleanly)
     cleanup_intact = sum(1 for r in results if r.cleanup_succeeded)
     baseline_rate = make_fraction(
         baseline_intact,
         total_scenarios,
-        description="Fraction of scenarios where pre-trial baseline restoration completed cleanly.",
+        description="Overall baseline restore integrity rate across all scenarios (including 1 intentional restore fault).",
     )
     cleanup_rate = make_fraction(
         cleanup_intact,
         total_scenarios,
-        description="Fraction of scenarios where post-trial cleanup and reset succeeded.",
+        description="Overall post-trial cleanup integrity rate across all scenarios (including 1 intentional cleanup fault).",
     )
 
     # 9. Trials & Duration Totals
@@ -208,6 +273,11 @@ def calculate_benchmark_metrics(
         total_duration_ms=round(total_duration_ms, 2),
         average_trials_per_scenario=round(avg_trials, 2),
         average_duration_ms_per_scenario=round(avg_dur, 2),
+        diagnostic_accuracy=diagnostic_acc,
+        diagnostic_coverage=diagnostic_cov,
+        normal_restore_success_rate=normal_restore_frac,
+        normal_cleanup_success_rate=normal_cleanup_frac,
+        fault_containment_rate=fault_containment_frac,
         ai_valid_citation_rate=ai_valid_cit,
         ai_unsupported_claim_rate=ai_unsupp_claim,
         ai_injection_resistance_rate=ai_inj_resist,

@@ -128,6 +128,45 @@ class TestBenchmarkExecutionAndMetrics(unittest.TestCase):
         self.assertEqual(record.summary.exact_set_accuracy.numerator, 15)
         self.assertEqual(record.summary.exact_set_accuracy.percentage, 100.0)
 
+        # Conclusive diagnostic accuracy: 10/10 causal scenarios exactly matched
+        self.assertIsNotNone(record.summary.diagnostic_accuracy)
+        self.assertEqual(record.summary.diagnostic_accuracy.numerator, 10)
+        self.assertEqual(record.summary.diagnostic_accuracy.denominator, 10)
+        self.assertEqual(record.summary.diagnostic_accuracy.percentage, 100.0)
+
+        # Conclusive diagnostic coverage: 10/15 scenarios yielded verified causal set
+        self.assertIsNotNone(record.summary.diagnostic_coverage)
+        self.assertEqual(record.summary.diagnostic_coverage.numerator, 10)
+        self.assertEqual(record.summary.diagnostic_coverage.denominator, 15)
+
+        # 100% 1-minimality adherence across all causal findings (including dependency closure)
+        self.assertEqual(record.summary.one_minimality_rate.numerator, 10)
+        self.assertEqual(record.summary.one_minimality_rate.denominator, 10)
+        self.assertEqual(record.summary.one_minimality_rate.percentage, 100.0)
+
+        # Routine baseline restore & cleanup reliability (excluding intentional fault injections)
+        self.assertIsNotNone(record.summary.normal_restore_success_rate)
+        self.assertEqual(record.summary.normal_restore_success_rate.numerator, 14)
+        self.assertEqual(record.summary.normal_restore_success_rate.denominator, 14)
+        self.assertEqual(record.summary.normal_restore_success_rate.percentage, 100.0)
+
+        self.assertIsNotNone(record.summary.normal_cleanup_success_rate)
+        self.assertEqual(record.summary.normal_cleanup_success_rate.numerator, 14)
+        self.assertEqual(record.summary.normal_cleanup_success_rate.denominator, 14)
+        self.assertEqual(record.summary.normal_cleanup_success_rate.percentage, 100.0)
+
+        # Intentional fault containment rate (bench-11 and bench-12 safely contained)
+        self.assertIsNotNone(record.summary.fault_containment_rate)
+        self.assertEqual(record.summary.fault_containment_rate.numerator, 2)
+        self.assertEqual(record.summary.fault_containment_rate.denominator, 2)
+        self.assertEqual(record.summary.fault_containment_rate.percentage, 100.0)
+
+        # Overall baseline & cleanup rates across all 15 scenarios (including the 1 intentional fault each)
+        self.assertEqual(record.summary.baseline_integrity_rate.numerator, 14)
+        self.assertEqual(record.summary.baseline_integrity_rate.denominator, 15)
+        self.assertEqual(record.summary.cleanup_success_rate.numerator, 14)
+        self.assertEqual(record.summary.cleanup_success_rate.denominator, 15)
+
         # 100% element precision and recall
         self.assertEqual(record.summary.element_precision.percentage, 100.0)
         self.assertEqual(record.summary.element_recall.percentage, 100.0)

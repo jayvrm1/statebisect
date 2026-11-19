@@ -540,22 +540,27 @@ Phase 11 completes the StateBisect roadmap by establishing honest, empirical ben
 
 ### Empirical Benchmark Results Summary
 - **Total Scenarios**: 15
-- **Exact Set Accuracy**: **15/15 (100.0%)**
+- **Conclusive Causal Diagnostic Accuracy**: **10/10 (100.0%)** (all 10 causal scenarios exactly matched ground truth)
+- **Outcome Classification Accuracy**: **15/15 (100.0%)** (all 15 scenarios matched expected verification / inconclusive classification)
+- **Diagnostic Conclusive Coverage**: **10/15 (66.7%)** (10 conclusive verified sets; 5 intentional negative/flaky/corrupted controls)
 - **Element Precision**: **15/15 (100.0%)**
 - **Element Recall**: **15/15 (100.0%)**
-- **1-Minimality Adherence Rate**: **8/10 (80.0%)** (non-1-minimal sets are dependency-constrained where single removal is mathematically impossible)
+- **1-Minimality Adherence Rate**: **10/10 (100.0%)** (verified under dependency-closed reduction)
 - **Interaction Recognition**: **4/4 (100.0%)**
 - **Bystander Rejection Rate**: **4/4 (100.0%)**
 - **False Attribution Rate**: **0/15 (0.0%)**
 - **Inconclusive Handling Rate**: **5/5 (100.0%)**
-- **Baseline Restore Integrity**: **14/15 (93.3%)**
-- **Post-Trial Cleanup Success**: **14/15 (93.3%)**
-- **Average Trials per Scenario**: **5.4 trials**
+- **Routine Baseline Restore Reliability**: **14/14 (100.0%)** (uncorrupted executions)
+- **Routine Post-Trial Cleanup Reliability**: **14/14 (100.0%)** (uncorrupted executions)
+- **Fault Injection Containment Rate**: **2/2 (100.0%)** (intentional restore and cleanup faults safely contained)
+- **Overall Raw Baseline Restore Integrity**: **14/15 (93.3%)** (includes 1 intentional restore fault)
+- **Overall Raw Cleanup Success**: **14/15 (93.3%)** (includes 1 intentional cleanup fault)
+- **Average Trials per Scenario**: **5.5 trials**
 - **Average Runtime per Scenario**: **1.0 ms** (simulation)
 
 ## Verification Results
-- All **192 unit and integration tests passing** across 18 test modules (`python -m unittest discover -s tests -v`).
-- AST exception audit verified: 0 forbidden control flow statements in `finally` blocks.
+- All **193 unit and integration tests passing** across 18 test modules (`python -m unittest discover -s tests -v`).
+- AST exception audit verified: 0 forbidden control flow statements in `finally` blocks across all 35+ source and test modules.
 - Phase 1 programmatic demonstration script runs cleanly (`python demo_phase1.py`).
 - Phase 11 benchmark CLI workflows verified end-to-end (`statebisect benchmark run`).
 - Schema migrations from v1 through v10 verified with zero data loss.

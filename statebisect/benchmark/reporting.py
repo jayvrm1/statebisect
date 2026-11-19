@@ -35,7 +35,11 @@ def format_benchmark_report_text(record: BenchmarkRunRecord) -> str:
 
     s = record.summary
     lines.append(f"  * Total Scenarios Evaluated   : {s.total_scenarios}")
-    lines.append(f"  * Exact Set Accuracy          : {format_fraction(s.exact_set_accuracy)}")
+    if s.diagnostic_accuracy:
+        lines.append(f"  * Conclusive Diagnostic Acc   : {format_fraction(s.diagnostic_accuracy)}")
+    lines.append(f"  * Exact Set Accuracy (Overall): {format_fraction(s.exact_set_accuracy)}")
+    if s.diagnostic_coverage:
+        lines.append(f"  * Conclusive Diagnosis Rate   : {format_fraction(s.diagnostic_coverage)}")
     lines.append(f"  * Element-Level Precision     : {format_fraction(s.element_precision)}")
     lines.append(f"  * Element-Level Recall        : {format_fraction(s.element_recall)}")
     lines.append(f"  * 1-Minimality Adherence Rate : {format_fraction(s.one_minimality_rate)}")
@@ -43,6 +47,12 @@ def format_benchmark_report_text(record: BenchmarkRunRecord) -> str:
     lines.append(f"  * Bystander Rejection Rate    : {format_fraction(s.bystander_rejection_rate)}")
     lines.append(f"  * False Attribution Rate      : {format_fraction(s.false_attribution_rate)}")
     lines.append(f"  * Inconclusive Handling Rate  : {format_fraction(s.inconclusive_correctness_rate)}")
+    if s.normal_restore_success_rate:
+        lines.append(f"  * Routine Restore Reliability : {format_fraction(s.normal_restore_success_rate)}")
+    if s.normal_cleanup_success_rate:
+        lines.append(f"  * Routine Cleanup Reliability : {format_fraction(s.normal_cleanup_success_rate)}")
+    if s.fault_containment_rate:
+        lines.append(f"  * Fault Injection Containment : {format_fraction(s.fault_containment_rate)}")
     lines.append(f"  * Baseline Restore Integrity  : {format_fraction(s.baseline_integrity_rate)}")
     lines.append(f"  * Post-Trial Cleanup Success  : {format_fraction(s.cleanup_success_rate)}")
     lines.append(f"  * Total Experiment Trials     : {s.total_trials} (Avg: {s.average_trials_per_scenario:.1f} trials/scenario)")

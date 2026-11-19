@@ -44,6 +44,20 @@ class DeltaDebugger:
         self.trial_cache: dict[tuple[str, ...], ExperimentTrial] = {}
         self.inconclusive_count = 0
 
+    def _get_transitive_dependents(self, item: str, candidate_pool: set[str]) -> set[str]:
+        """Find all changes in candidate_pool that transitively depend on `item`."""
+        dependents: set[str] = set()
+        to_process = [item]
+        while to_process:
+            current = to_process.pop(0)
+            for cid in candidate_pool:
+                if cid not in dependents and cid != item:
+                    change = self.all_changes.get(cid)
+                    if change and current in change.dependencies:
+                        dependents.add(cid)
+                        to_process.append(cid)
+        return dependents
+
     def _test(self, change_ids: list[str], notes: str = "") -> ExperimentTrial:
         key = tuple(sorted(change_ids))
         if key in self.trial_cache:
@@ -245,9 +259,19 @@ class DeltaDebugger:
                 if self.runner.cancellation_token.is_cancelled:
                     return self._cancellation_result(suspected_subset=c)
 
-                without_item = [x for x in c if x != item]
+                # Under dependency closure: removing `item` also removes all changes in `c`
+                # that depend on `item` (since a child change cannot exist without its prerequisite).
+                dependents = self._get_transitive_dependents(item, set(c))
+                without_item = [x for x in c if x != item and x not in dependents]
+
+                if not without_item:
+                    # Removing item and its dependents leaves the baseline (empty set),
+                    # which was already verified to PASS at step 1.
+                    continue
+
                 sub_trial = self._test(
-                    without_item, notes=f"1-minimality verification removing {item}"
+                    without_item,
+                    notes=f"1-minimality verification removing {item} (and dependents {sorted(dependents)})",
                 )
                 if sub_trial.reset_status.startswith("FAILED"):
                     return MinimizationResult(

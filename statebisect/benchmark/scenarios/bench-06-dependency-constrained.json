@@ -71,7 +71,7 @@
     "intermittent_rate": 0.5,
     "parameters": {}
   },
-  "expected_classification": "INCONCLUSIVE_SUBSET",
+  "expected_classification": "VERIFIED_SET",
   "baseline_id": "baseline-001",
   "differential_baseline_id": null,
   "fault_injection": {},

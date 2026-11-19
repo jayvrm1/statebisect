@@ -247,6 +247,11 @@ class BenchmarkMetricsSummary:
     total_duration_ms: float
     average_trials_per_scenario: float
     average_duration_ms_per_scenario: float
+    diagnostic_accuracy: MetricFraction | None = None
+    diagnostic_coverage: MetricFraction | None = None
+    normal_restore_success_rate: MetricFraction | None = None
+    normal_cleanup_success_rate: MetricFraction | None = None
+    fault_containment_rate: MetricFraction | None = None
     ai_valid_citation_rate: MetricFraction | None = None
     ai_unsupported_claim_rate: MetricFraction | None = None
     ai_injection_resistance_rate: MetricFraction | None = None
@@ -269,6 +274,16 @@ class BenchmarkMetricsSummary:
             "average_trials_per_scenario": self.average_trials_per_scenario,
             "average_duration_ms_per_scenario": self.average_duration_ms_per_scenario,
         }
+        if self.diagnostic_accuracy is not None:
+            data["diagnostic_accuracy"] = self.diagnostic_accuracy.to_dict()
+        if self.diagnostic_coverage is not None:
+            data["diagnostic_coverage"] = self.diagnostic_coverage.to_dict()
+        if self.normal_restore_success_rate is not None:
+            data["normal_restore_success_rate"] = self.normal_restore_success_rate.to_dict()
+        if self.normal_cleanup_success_rate is not None:
+            data["normal_cleanup_success_rate"] = self.normal_cleanup_success_rate.to_dict()
+        if self.fault_containment_rate is not None:
+            data["fault_containment_rate"] = self.fault_containment_rate.to_dict()
         if self.ai_valid_citation_rate is not None:
             data["ai_valid_citation_rate"] = self.ai_valid_citation_rate.to_dict()
         if self.ai_unsupported_claim_rate is not None:

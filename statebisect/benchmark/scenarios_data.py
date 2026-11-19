@@ -183,7 +183,7 @@ def get_all_scenarios() -> list[BenchmarkScenario]:
                     }
                 ],
             ),
-            expected_classification=ExpectedVerdict.INCONCLUSIVE_SUBSET,
+            expected_classification=ExpectedVerdict.VERIFIED_SET,
             baseline_id="baseline-001",
             owner_notes="Evaluates dependency order resolution and bystander exclusion.",
         )
@@ -215,7 +215,7 @@ def get_all_scenarios() -> list[BenchmarkScenario]:
                     }
                 ],
             ),
-            expected_classification=ExpectedVerdict.INCONCLUSIVE_SUBSET,
+            expected_classification=ExpectedVerdict.VERIFIED_SET,
             baseline_id="baseline-001",
             owner_notes="Tests topological change sorting during trial execution.",
         )
